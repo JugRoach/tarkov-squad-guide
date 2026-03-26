@@ -57,6 +57,74 @@ const ET_CONFIG = {
 
 const TC = {Beginner:"#4a9a4a",Intermediate:"#9a8a3a",Advanced:"#9a4a3a",Endgame:"#4a8a9a"};
 
+// ─── KEY GUIDE — Notable loot room keys per map ──────────────────────────
+const MAP_KEYS = {
+  customs:[
+    {key:"Marked Key (Dorms 314)",use:"Marked Room — rare weapons, cases, keycards",priority:"high"},
+    {key:"Dorms Room 204 Key",use:"Quest items (Prapor), loose loot",priority:"med"},
+    {key:"Dorms Room 214 Key",use:"Quest items, safe, PC",priority:"med"},
+    {key:"Dorms Room 220 Key",use:"Quest items (Therapist early tasks)",priority:"med"},
+    {key:"Customs Office Key",use:"Safe + filing cabinets in Big Red office",priority:"med"},
+    {key:"Unknown Key",use:"Locked room near ZB-1014 — loose loot",priority:"low"},
+  ],
+  factory:[
+    {key:"Factory Key",use:"Smugglers' Passage extract + locked shortcuts",priority:"high"},
+  ],
+  woods:[
+    {key:"Shturman's Stash Key",use:"Shturman's crate near sawmill — rare loot",priority:"high"},
+    {key:"ZB-014 Key",use:"Underground bunker — weapon crates, loot",priority:"med"},
+    {key:"Yotota Car Key",use:"Locked car — loose valuables",priority:"low"},
+  ],
+  interchange:[
+    {key:"KIBA Store Key (Part 1 & 2)",use:"KIBA weapon store — best weapon loot on map",priority:"high"},
+    {key:"ULTRA Medical Storage Key",use:"LEDX, defibs, rare medical spawns",priority:"high"},
+    {key:"Object 11SR Keycard",use:"Secret room — rare barter, electronics",priority:"high"},
+    {key:"21WS Keycard",use:"Weapon safe room — rare spawns",priority:"med"},
+    {key:"EMERCOM Medical Unit Key",use:"Medical crates, stims",priority:"med"},
+  ],
+  shoreline:[
+    {key:"East Wing Room 310 Key",use:"LEDX spawn, medical supplies",priority:"high"},
+    {key:"East Wing Room 226 Key",use:"Safe, intel folder, valuables",priority:"high"},
+    {key:"East Wing Room 222/218 Key",use:"Weapon spawns, rare attachments",priority:"med"},
+    {key:"West Wing Room 301 Key",use:"Safe, electronics, weapon parts",priority:"med"},
+    {key:"West Wing Room 216 Key",use:"Quest items, loose loot",priority:"med"},
+    {key:"Cottage Key (Cottage Safe)",use:"Safe + weapon spawn in cottage area",priority:"med"},
+    {key:"Health Resort Universal Key",use:"Opens admin offices — PCs, filing cabinets",priority:"low"},
+  ],
+  reserve:[
+    {key:"RB-BK Marked Room Key",use:"Marked room — rare loot, weapon cases",priority:"high"},
+    {key:"RB-VO Key",use:"Medical supply room — LEDX chance",priority:"high"},
+    {key:"RB-AM Key",use:"Ammo & weapon attachments room",priority:"med"},
+    {key:"RB-GN Key",use:"Intel, electronics room",priority:"med"},
+    {key:"RB-KPRL Key",use:"Underground room — weapon parts",priority:"med"},
+    {key:"RB-PSP1/PSP2 Keys",use:"Bunker rooms — loot caches",priority:"med"},
+  ],
+  lighthouse:[
+    {key:"Hillside House Key",use:"Safes, valuables in chalet area",priority:"high"},
+    {key:"Water Treatment Plant Key (multiple)",use:"Various locked buildings in Rogue camp",priority:"med"},
+    {key:"Operating Room Key",use:"Medical supplies, LEDX chance",priority:"med"},
+    {key:"Conference Room Key",use:"Intel, electronics",priority:"med"},
+  ],
+  "streets-of-tarkov":[
+    {key:"Concordia Apartment Keys",use:"Multiple apartments — safes, PCs, valuables",priority:"high"},
+    {key:"Abandoned Factory Key",use:"Weapon crates, loose loot",priority:"med"},
+    {key:"Hotel Room Keys (various)",use:"Cardinal/Pinewood hotels — safes, loot",priority:"med"},
+    {key:"Financial Office Key",use:"Safe, intel folder, electronics",priority:"med"},
+  ],
+  "ground-zero":[
+    {key:"Office Key (Ground Zero)",use:"Office building safes + PCs",priority:"med"},
+    {key:"Supermarket Storage Key",use:"Back room — food, barter items",priority:"low"},
+  ],
+  "the-lab":[
+    {key:"Lab. Green Keycard",use:"Green lab — LEDX, stims, rare medical",priority:"high"},
+    {key:"Lab. Blue Keycard",use:"Blue lab — electronics, tech spawns",priority:"high"},
+    {key:"Lab. Black Keycard",use:"Black room — weapons, rare gear",priority:"high"},
+    {key:"Lab. Violet Keycard",use:"Violet room — intel, electronics",priority:"high"},
+    {key:"Lab. Yellow Keycard",use:"Yellow lab — medical, electronics",priority:"med"},
+    {key:"Lab. Access Keycard",use:"Required to enter The Lab raid",priority:"high"},
+  ],
+};
+
 const LOOT_CONFIG = {
   "high-value":{label:"High Value",icon:"★",color:"#d4b84a",bg:"#1a1a08",border:"#6a5a0a"},
   tech:        {label:"Tech",      icon:"⚡",color:"#5a9aba",bg:"#08101a",border:"#2a4a6a"},
@@ -3200,7 +3268,7 @@ function ExtractsTab() {
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       <div style={{ background: T.surface, borderBottom: `1px solid ${T.border}`, padding: "10px 14px 0" }}>
         <div style={{ display: "flex", gap: 5, marginBottom: 10 }}>
-          {["extracts", "roadmap"].map(v => <Btn key={v} ch={v} onClick={() => setSv(v)} active={sv === v} />)}
+          {["extracts", "keys", "roadmap"].map(v => <Btn key={v} ch={v === "keys" ? "Key Guide" : v} onClick={() => setSv(v)} active={sv === v} />)}
         </div>
         {sv === "extracts" && <>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 4, paddingBottom: 10 }}>
@@ -3226,6 +3294,38 @@ function ExtractsTab() {
               ))}
             </div>
           ))}
+        </>}
+        {sv === "keys" && <>
+          <div style={{ background: T.orangeBg, border: `1px solid ${ET_CONFIG.key.border}`, borderLeft: `2px solid ${ET_CONFIG.key.color}`, padding: "10px 12px", marginBottom: 14, fontSize: T.fs2, color: ET_CONFIG.key.color, lineHeight: 1.7 }}>
+            <Tip text="Quick reference for which keys to bring on each map. Includes extract keys and valuable loot room keys. Priority: HIGH = don't raid without it, MED = nice to have, LOW = situational." />
+            ⚿ Keys organized by map — extract keys and high-value loot room keys. Tap a map to see its extracts.
+          </div>
+          {EMAPS.map(map => {
+            const extractKeys = [...map.pmcExtracts, ...map.scavExtracts].filter(e => e.type === "key").map(e => ({ key: e.requireItems.join(" + "), use: `Extract: ${e.name}`, priority: "high", isExtract: true }));
+            const uniqueExtractKeys = extractKeys.filter((k, i, arr) => arr.findIndex(a => a.key === k.key) === i);
+            const lootKeys = MAP_KEYS[map.id] || [];
+            const allKeys = [...uniqueExtractKeys, ...lootKeys];
+            if (allKeys.length === 0) return null;
+            const prioColor = { high: T.gold, med: T.cyan, low: T.textDim };
+            const prioLabel = { high: "HIGH", med: "MED", low: "LOW" };
+            return (
+              <div key={map.id} style={{ marginBottom: 14 }}>
+                <div onClick={() => { setSel(map); setSv("extracts"); setFil("key"); }} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", borderBottom: `1px solid ${map.color}33`, paddingBottom: 6, marginBottom: 8 }}>
+                  <div style={{ color: map.color, fontSize: T.fs3, fontWeight: "bold", letterSpacing: 1 }}>{map.name.toUpperCase()}</div>
+                  <div style={{ fontSize: T.fs1, color: T.textDim }}>{allKeys.length} key{allKeys.length !== 1 ? "s" : ""} →</div>
+                </div>
+                {allKeys.map((k, i) => (
+                  <div key={i} style={{ background: k.isExtract ? T.orangeBg : T.surface, border: `1px solid ${k.isExtract ? ET_CONFIG.key.border : T.border}`, borderLeft: `2px solid ${k.isExtract ? ET_CONFIG.key.color : prioColor[k.priority]}`, padding: "8px 10px", marginBottom: 5, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: T.fs3, color: k.isExtract ? ET_CONFIG.key.color : T.textBright, fontWeight: "bold" }}>{k.isExtract ? "⚿ " : "🔑 "}{k.key}</div>
+                      <div style={{ fontSize: T.fs2, color: T.textDim, marginTop: 3, lineHeight: 1.5 }}>{k.use}</div>
+                    </div>
+                    <Badge label={k.isExtract ? "EXTRACT" : prioLabel[k.priority]} color={k.isExtract ? ET_CONFIG.key.color : prioColor[k.priority]} small />
+                  </div>
+                ))}
+              </div>
+            );
+          })}
         </>}
         {sv === "extracts" && <>
           <div style={{ background: T.surface, border: `1px solid ${sel.color}33`, borderLeft: `2px solid ${sel.color}`, padding: 10, marginBottom: 12 }}>
