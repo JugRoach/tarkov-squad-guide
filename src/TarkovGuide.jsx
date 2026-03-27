@@ -1499,7 +1499,7 @@ function MyProfileTab({ myProfile, saveMyProfile, apiTasks, apiTraders, loading,
       if (taskMapFilter !== "all" && t.map?.name !== taskMapFilter) return false;
       if (taskSearch && !t.name.toLowerCase().includes(taskSearch.toLowerCase())) return false;
       return true;
-    }).slice(0, browseLimit);
+    }).sort((a, b) => a.name.localeCompare(b.name)).slice(0, browseLimit);
     const addAllForTrader = (traderName) => {
       const trTasks = (apiTasks || []).filter(t => t.trader?.name === traderName);
       let allTasks = [...(myProfile.tasks || [])];
@@ -1678,6 +1678,7 @@ function MyProfileTab({ myProfile, saveMyProfile, apiTasks, apiTraders, loading,
             if (!traderGroups[traderName]) traderGroups[traderName] = [];
             traderGroups[traderName].push({ taskId, apiTask });
           });
+          Object.values(traderGroups).forEach(tasks => tasks.sort((a, b) => a.apiTask.name.localeCompare(b.apiTask.name)));
           const sortedTraders = Object.keys(traderGroups).sort(traderSort);
           return (
             <>
