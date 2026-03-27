@@ -3404,7 +3404,7 @@ function WelcomeBanner({ onDismiss }) {
 }
 
 function BottomNav({ tab, setTab }) {
-  const items = [{ id: "profile", label: "My Profile", icon: "▲" }, { id: "squad", label: "Squad", icon: "◈" }, { id: "extracts", label: "Extracts", icon: "⬆" }, { id: "maps", label: "Maps", icon: "🗺" }];
+  const items = [{ id: "profile", label: "My Profile", icon: "▲" }, { id: "squad", label: "Squad", icon: "◈" }, { id: "extracts", label: "Map Info", icon: "⬆" }, { id: "maps", label: "Maps", icon: "🗺" }];
   return (
     <div style={{ display: "flex", borderTop: `2px solid ${T.borderBright}`, background: T.surface, flexShrink: 0 }}>
       {items.map(item => <button key={item.id} onClick={() => setTab(item.id)} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", padding: "12px 4px 10px", background: tab === item.id ? T.gold + "12" : "transparent", border: "none", cursor: "pointer", borderTop: `2px solid ${tab === item.id ? T.gold : "transparent"}`, transition: "background 0.15s" }}><span style={{ fontSize: T.fs4, marginBottom: 3 }}>{item.icon}</span><span style={{ fontSize: T.fs2, letterSpacing: 0.5, fontWeight: tab === item.id ? "bold" : "normal", fontFamily: T.sans, textTransform: "uppercase", color: tab === item.id ? T.gold : T.textDim }}>{item.label}</span></button>)}
