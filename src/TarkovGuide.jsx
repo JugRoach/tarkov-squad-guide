@@ -1432,7 +1432,9 @@ function PostRaidTracker({ route, myProfile, onSave, onClose }) {
 // ─── MY PROFILE TAB ──────────────────────────────────────────────────────
 function MyProfileTab({ myProfile, saveMyProfile, apiTasks, apiTraders, loading, apiError, apiHideout, hideoutLevels, saveHideoutLevels, hideoutTarget, saveHideoutTarget }) {
   const [screen, setScreen] = useState("profile");
-  const [profileSub, setProfileSub] = useState("profile"); // "profile" | "tasks" | "hideout"
+  const [profileSub, setProfileSub] = useState("profile"); // "profile" | "tasks" | "hideout" | "chains"
+  const [chainTrader, setChainTrader] = useState("all");
+  const [expandedChainNodes, setExpandedChainNodes] = useState(new Set());
   const [taskSearch, setTaskSearch] = useState("");
   const [taskTrader, setTaskTrader] = useState("all");
   const [taskMapFilter, setTaskMapFilter] = useState("all");
@@ -1599,6 +1601,7 @@ function MyProfileTab({ myProfile, saveMyProfile, apiTasks, apiTraders, loading,
   const subTabs = [
     { id: "profile", label: "Profile", icon: "▲" },
     { id: "tasks", label: `Tasks (${myProfile.tasks?.length || 0})`, icon: "★" },
+    { id: "chains", label: "Trees", icon: "⛓" },
     { id: "hideout", label: "Hideout", icon: "◈" },
   ];
 
@@ -1942,6 +1945,100 @@ function MyProfileTab({ myProfile, saveMyProfile, apiTasks, apiTraders, loading,
               ) : (
                 <div style={{ color: T.textDim, fontSize: T.fs2, textAlign: "center", padding: 20 }}>Loading hideout data...</div>
               )}
+            </>
+          );
+        })()}
+
+        {/* ── TASK TREES SUB-TAB ── */}
+        {profileSub === "chains" && (() => {
+          const allTasks = apiTasks || [];
+          // Build tree for selected trader (or all)
+          const filteredTasks = chainTrader === "all" ? allTasks : allTasks.filter(t => t.trader?.name === chainTrader);
+          const filteredIds = new Set(filteredTasks.map(t => t.id));
+          // Build children map: prereqId -> tasks that require it
+          const childrenMap = {};
+          const hasParent = new Set();
+          filteredTasks.forEach(task => {
+            (task.taskRequirements || []).forEach(req => {
+              if (req.status?.includes("complete") && req.task?.id && filteredIds.has(req.task.id)) {
+                if (!childrenMap[req.task.id]) childrenMap[req.task.id] = [];
+                childrenMap[req.task.id].push(task);
+                hasParent.add(task.id);
+              }
+            });
+          });
+          // Sort children alphabetically
+          Object.values(childrenMap).forEach(arr => arr.sort((a, b) => a.name.localeCompare(b.name)));
+          const roots = filteredTasks.filter(t => !hasParent.has(t.id)).sort((a, b) => a.name.localeCompare(b.name));
+          const toggleNode = (id) => setExpandedChainNodes(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
+          const expandAll = () => { const all = new Set(); filteredTasks.forEach(t => { if (childrenMap[t.id]?.length) all.add(t.id); }); setExpandedChainNodes(all); };
+          const collapseAll = () => setExpandedChainNodes(new Set());
+          const isAdded = (id) => myProfile.tasks?.some(t => t.taskId === id);
+          const isComplete = (task) => {
+            const prog = myProfile.progress || {};
+            const objs = (task.objectives || []).filter(o => !o.optional);
+            if (!objs.length) return false;
+            return objs.every(obj => { const k = `${myProfile.id}-${task.id}-${obj.id}`; const meta = getObjMeta(obj); return (prog[k] || 0) >= meta.total; });
+          };
+          const getProgress = (task) => {
+            const prog = myProfile.progress || {};
+            const objs = (task.objectives || []).filter(o => !o.optional);
+            const completed = objs.filter(obj => { const k = `${myProfile.id}-${task.id}-${obj.id}`; const meta = getObjMeta(obj); return (prog[k] || 0) >= meta.total; }).length;
+            return { completed, total: objs.length };
+          };
+          const renderNode = (task, depth) => {
+            const kids = childrenMap[task.id] || [];
+            const hasKids = kids.length > 0;
+            const isExp = expandedChainNodes.has(task.id);
+            const added = isAdded(task.id);
+            const done = isComplete(task);
+            const progress = added ? getProgress(task) : null;
+            const nodeColor = done ? T.success : added ? myProfile.color : T.textDim;
+            return (
+              <div key={task.id}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 8px", marginLeft: depth * 20, background: done ? T.successBg : added ? myProfile.color + "11" : "transparent", borderLeft: `2px solid ${nodeColor}`, marginBottom: 2, cursor: hasKids ? "pointer" : "default" }} onClick={() => hasKids && toggleNode(task.id)}>
+                  <span style={{ fontSize: T.fs3, color: nodeColor, width: 14, textAlign: "center", flexShrink: 0 }}>{hasKids ? (isExp ? "▼" : "▶") : "─"}</span>
+                  <span style={{ fontSize: T.fs2, color: done ? T.success : T.textBright, fontWeight: "bold", flex: 1, textDecoration: done ? "line-through" : "none" }}>{task.name}</span>
+                  {progress && <span style={{ fontSize: T.fs1, color: done ? T.success : progress.completed > 0 ? myProfile.color : T.textDim, fontFamily: T.sans, whiteSpace: "nowrap" }}>{progress.completed}/{progress.total} obj</span>}
+                  {task.wikiLink && <a href={task.wikiLink} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()} style={{ background: T.blue + "22", color: T.blue, border: `1px solid ${T.blue}44`, padding: "2px 6px", fontSize: T.fs1, letterSpacing: 0.5, fontFamily: T.sans, whiteSpace: "nowrap", textDecoration: "none", fontWeight: "normal" }}>WIKI ↗</a>}
+                  {hasKids && <span style={{ fontSize: T.fs1, color: T.textDim, fontFamily: T.sans }}>{kids.length}</span>}
+                </div>
+                {hasKids && isExp && (
+                  <div style={{ borderLeft: `1px solid ${T.border}`, marginLeft: depth * 20 + 15 }}>
+                    {kids.map(child => renderNode(child, depth + 1))}
+                  </div>
+                )}
+              </div>
+            );
+          };
+          // Cross-trader prereqs note
+          const crossTraderTasks = chainTrader !== "all" ? filteredTasks.filter(t =>
+            (t.taskRequirements || []).some(r => r.status?.includes("complete") && r.task?.id && !filteredIds.has(r.task.id))
+          ) : [];
+          return (
+            <>
+              <SL c={<>TASK TREES<Tip text="Explore task prerequisite chains by trader. Expand nodes to see what each task unlocks. Green = completed, highlighted = in your task list." /></>} s={{ marginBottom: 8 }} />
+              <div style={{ fontSize: T.fs2, color: T.textDim, letterSpacing: 1.5, marginBottom: 6, fontFamily: T.sans }}>TRADER</div>
+              <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+                {["all", ...traders].map(tr => (
+                  <button key={tr} onClick={() => { setChainTrader(tr); setExpandedChainNodes(new Set()); }} style={{ display: "flex", alignItems: "center", gap: 4, background: chainTrader === tr ? myProfile.color + "22" : "transparent", border: `1px solid ${chainTrader === tr ? myProfile.color : T.border}`, color: chainTrader === tr ? myProfile.color : T.textDim, padding: "6px 10px", fontSize: T.fs2, cursor: "pointer", fontFamily: T.sans }}>
+                    {tr !== "all" && traderImgMap[tr] && <img src={traderImgMap[tr]} alt={tr} style={{ width: 18, height: 18, borderRadius: "50%", objectFit: "cover" }} />}
+                    {tr === "all" ? "ALL" : tr}
+                  </button>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                <button onClick={expandAll} style={{ flex: 1, background: "transparent", border: `1px solid ${T.borderBright}`, color: T.textDim, padding: "6px 0", fontSize: T.fs2, cursor: "pointer", fontFamily: T.sans, letterSpacing: 1 }}>EXPAND ALL</button>
+                <button onClick={collapseAll} style={{ flex: 1, background: "transparent", border: `1px solid ${T.borderBright}`, color: T.textDim, padding: "6px 0", fontSize: T.fs2, cursor: "pointer", fontFamily: T.sans, letterSpacing: 1 }}>COLLAPSE ALL</button>
+              </div>
+              <div style={{ fontSize: T.fs3, color: T.textDim, letterSpacing: 1, marginBottom: 8 }}>{roots.length} ROOT{roots.length !== 1 ? "S" : ""} · {filteredTasks.length} TASKS</div>
+              {crossTraderTasks.length > 0 && (
+                <div style={{ background: T.surface, border: `1px solid ${T.border}`, padding: 8, marginBottom: 10, fontSize: T.fs2, color: T.textDim }}>
+                  ⚠ {crossTraderTasks.length} task{crossTraderTasks.length !== 1 ? "s have" : " has"} prerequisites from other traders (shown as roots here)
+                </div>
+              )}
+              {roots.map(task => renderNode(task, 0))}
+              {roots.length === 0 && <div style={{ color: T.textDim, fontSize: T.fs2, textAlign: "center", padding: 20 }}>{apiTasks ? "No tasks found" : "Loading..."}</div>}
             </>
           );
         })()}
