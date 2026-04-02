@@ -544,8 +544,8 @@ function computeMapRecommendation(profiles, apiTasks) {
       if (!mapStats[mid]) mapStats[mid] = { mapId: mid, mapName: apiTask.map.name, totalTasks: 0, totalIncomplete: 0, players: {} };
       const ms = mapStats[mid];
 
-      if (!ms.players[profile.id]) ms.players[profile.id] = { name: profile.name, color: profile.color, isMe: !profile.imported, tasks: [] };
-      ms.players[profile.id].tasks.push({ taskName: apiTask.name, remaining: totalObjs - doneObjs, total: totalObjs });
+      if (!ms.players[profile.id]) ms.players[profile.id] = { name: profile.name, color: profile.color, isMe: !profile.imported, id: profile.id, progress: profile.progress || {}, tasks: [] };
+      ms.players[profile.id].tasks.push({ taskId, taskName: apiTask.name, remaining: totalObjs - doneObjs, total: totalObjs });
       ms.totalTasks++;
       ms.totalIncomplete += (totalObjs - doneObjs);
     });
@@ -868,10 +868,12 @@ function HideoutManager({ apiHideout, hideoutLevels, saveHideoutLevels, hideoutT
 }
 
 // ─── MAP RECOMMENDATION UI ───────────────────────────────────────────────
-function MapRecommendation({ allProfiles, activeIds, apiTasks, apiMaps, onSelectMap, selectedMapId, hideoutTarget, apiHideout }) {
+function MapRecommendation({ allProfiles, activeIds, apiTasks, apiTraders, apiMaps, onSelectMap, selectedMapId, hideoutTarget, apiHideout }) {
   const [expanded, setExpanded] = useState(false);
   const [mode, setMode] = useState("tasks"); // "tasks", "hideout", "looking"
   const [lookPath, setLookPath] = useState([]); // drill-down path of category ids
+  const [expandedTask, setExpandedTask] = useState(null);
+  const traderImgMap = Object.fromEntries((apiTraders || []).map(t => [t.name, t.imageLink]));
 
   const profiles = activeIds.size > 0
     ? allProfiles.filter(p => activeIds.has(p.id))
@@ -985,7 +987,46 @@ function MapRecommendation({ allProfiles, activeIds, apiTasks, apiMaps, onSelect
               {top.playerList.map(pl => (
                 <div key={pl.name} style={{ borderLeft: `2px solid ${pl.color}`, paddingLeft: 8, marginBottom: 8 }}>
                   <div style={{ fontSize: T.fs3, color: pl.color, fontWeight: "bold", marginBottom: 3 }}>{pl.name}{pl.isMe ? <span style={{ fontSize: T.fs1, color: T.textDim, fontWeight: "normal", marginLeft: 4 }}>YOU</span> : ""}</div>
-                  {pl.tasks.map((t, i) => <div key={i} style={{ fontSize: T.fs3, color: T.textDim, marginBottom: 2, paddingLeft: 4 }}>★ {t.taskName} — <span style={{ color: t.remaining === t.total ? "#7a8a7a" : "#ba9a4a" }}>{t.remaining}/{t.total} obj</span></div>)}
+                  {pl.tasks.map(t => {
+                    const apiTask = apiTasks?.find(x => x.id === t.taskId);
+                    if (!apiTask) return <div key={t.taskId} style={{ fontSize: T.fs3, color: T.textDim, marginBottom: 2, paddingLeft: 4 }}>★ {t.taskName} — <span style={{ color: t.remaining === t.total ? "#7a8a7a" : "#ba9a4a" }}>{t.remaining}/{t.total} obj</span></div>;
+                    const reqObjs = (apiTask.objectives || []).filter(o => !o.optional);
+                    const completedObjs = reqObjs.filter(obj => { const k = `${pl.id}-${t.taskId}-${obj.id}`; const meta = getObjMeta(obj); return (pl.progress[k] || 0) >= meta.total; }).length;
+                    const totalObjs = reqObjs.length;
+                    const isComplete = completedObjs >= totalObjs && totalObjs > 0;
+                    const traderName = apiTask.trader?.name || "Unknown";
+                    const incompleteObjs = reqObjs.filter(obj => { const k = `${pl.id}-${t.taskId}-${obj.id}`; const meta = getObjMeta(obj); return (pl.progress[k] || 0) < meta.total; });
+                    const eKey = `${pl.id}-${t.taskId}`;
+                    return (
+                      <div key={t.taskId} style={{ background: isComplete ? T.successBg : T.surface, border: `1px solid ${isComplete ? T.successBorder : T.border}`, borderLeft: `2px solid ${isComplete ? T.success : pl.color}`, padding: 10, marginBottom: 4 }}>
+                        <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                          {traderImgMap[traderName] && <img src={traderImgMap[traderName]} alt={traderName} style={{ width: 24, height: 24, borderRadius: "50%", border: `1px solid ${pl.color}44`, objectFit: "cover", flexShrink: 0, marginTop: 2 }} />}
+                          <div style={{ flex: 1 }}>
+                            <div style={{ color: isComplete ? T.success : T.textBright, fontSize: T.fs2, fontWeight: "bold", textDecoration: isComplete ? "line-through" : "none", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>{apiTask.name}{apiTask.wikiLink && <a href={apiTask.wikiLink} target="_blank" rel="noreferrer" style={{ background: T.blue + "22", color: T.blue, border: `1px solid ${T.blue}44`, padding: "2px 6px", fontSize: T.fs1, letterSpacing: 0.5, fontFamily: T.sans, whiteSpace: "nowrap", textDecoration: "none", fontWeight: "normal" }}>WIKI ↗</a>}</div>
+                            <div style={{ display: "flex", gap: 5, marginTop: 4, flexWrap: "wrap", alignItems: "center" }}>
+                              <Badge label={traderName} color={pl.color} />
+                              <span style={{ fontSize: T.fs2, color: isComplete ? T.success : T.textDim }}>{completedObjs}/{totalObjs} obj</span>
+                            </div>
+                            {!isComplete && (() => {
+                              const showAll = incompleteObjs.length <= 6;
+                              const visible = showAll ? incompleteObjs : incompleteObjs.slice(0, 2);
+                              return <>
+                                {visible.map(obj => {
+                                  const meta = getObjMeta(obj);
+                                  return <div key={obj.id} style={{ fontSize: T.fs1, color: T.textDim, marginTop: 3 }}><span style={{ color: meta.color }}>{meta.icon}</span> {obj.description}</div>;
+                                })}
+                                {!showAll && <button onClick={() => setExpandedTask(expandedTask === eKey ? null : eKey)} style={{ background: "transparent", border: "none", color: T.blue, fontSize: T.fs1, cursor: "pointer", padding: 0, marginTop: 3, fontFamily: T.sans }}>{expandedTask === eKey ? "▴ show less" : `▾ +${incompleteObjs.length - 2} more`}</button>}
+                                {!showAll && expandedTask === eKey && incompleteObjs.slice(2).map(obj => {
+                                  const meta = getObjMeta(obj);
+                                  return <div key={obj.id} style={{ fontSize: T.fs1, color: T.textDim, marginTop: 3 }}><span style={{ color: meta.color }}>{meta.icon}</span> {obj.description}</div>;
+                                })}
+                              </>;
+                            })()}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               ))}
             </>;
@@ -1483,6 +1524,7 @@ function MyProfileTab({ myProfile, saveMyProfile, apiTasks, apiTraders, loading,
     const newTasks = [...existing, { taskId }];
     let newProgress = { ...(myProfile.progress || {}) };
     prereqIds.forEach(prereqId => {
+      if (existing.some(t => t.taskId === prereqId)) return;
       const prereqTask = apiTasks?.find(t => t.id === prereqId);
       if (prereqTask) newProgress = markTaskCompleteInProgress(myProfile.id, prereqId, prereqTask, newProgress);
     });
@@ -3072,6 +3114,7 @@ function SquadTab({ myProfile, saveMyProfile, apiMaps, apiTasks, apiTraders, loa
             allProfiles={allProfiles}
             activeIds={activeIds}
             apiTasks={apiTasks}
+            apiTraders={apiTraders}
             apiMaps={apiMaps}
             onSelectMap={setSelectedMapId}
             selectedMapId={selectedMapId}
