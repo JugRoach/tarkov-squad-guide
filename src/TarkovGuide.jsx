@@ -1695,7 +1695,17 @@ function MyProfileTab({ myProfile, saveMyProfile, apiTasks, apiTraders, loading,
             const apiTask = apiTasks?.find(x => x.id === t.taskId);
             return apiTask ? { taskId: t.taskId, apiTask } : null;
           }).filter(Boolean);
-          myTasksWithApi.sort((a, b) => a.apiTask.name.localeCompare(b.apiTask.name));
+          const isTaskComplete = ({ taskId, apiTask }) => {
+            const prog = myProfile.progress || {};
+            const reqObjs = (apiTask.objectives || []).filter(o => !o.optional);
+            const completedObjs = reqObjs.filter(obj => { const k = `${myProfile.id}-${taskId}-${obj.id}`; const meta = getObjMeta(obj); return (prog[k] || 0) >= meta.total; }).length;
+            return completedObjs >= reqObjs.length && reqObjs.length > 0;
+          };
+          myTasksWithApi.sort((a, b) => {
+            const ac = isTaskComplete(a), bc = isTaskComplete(b);
+            if (ac !== bc) return ac ? 1 : -1;
+            return a.apiTask.name.localeCompare(b.apiTask.name);
+          });
           const renderCard = ({ taskId, apiTask }) => {
             const prog = myProfile.progress || {};
             const reqObjs = (apiTask.objectives || []).filter(o => !o.optional);
