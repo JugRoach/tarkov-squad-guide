@@ -1642,7 +1642,10 @@ function MyProfileTab({ myProfile, saveMyProfile, apiTasks, apiTraders, loading,
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, marginBottom: 4 }}>
                   <div style={{ color: prereqDone ? T.success : T.textBright, fontSize: T.fs2, fontWeight: "bold", flex: 1, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", textDecoration: prereqDone ? "line-through" : "none" }}>{task.name}{task.wikiLink && <a href={task.wikiLink} target="_blank" rel="noreferrer" style={{ background: T.blue + "22", color: T.blue, border: `1px solid ${T.blue}44`, padding: "2px 6px", fontSize: T.fs1, letterSpacing: 0.5, fontFamily: T.sans, whiteSpace: "nowrap", textDecoration: "none", fontWeight: "normal" }}>WIKI ↗</a>}</div>
                   {prereqDone ? (
-                    <span style={{ background: T.successBg, border: `1px solid ${T.successBorder}`, color: T.success, padding: "4px 8px", fontSize: T.fs2, fontFamily: T.sans, flexShrink: 0, letterSpacing: 1 }}>COMPLETE</span>
+                    <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                      <span style={{ background: T.successBg, border: `1px solid ${T.successBorder}`, color: T.success, padding: "4px 8px", fontSize: T.fs2, fontFamily: T.sans, letterSpacing: 1 }}>COMPLETE</span>
+                      <button onClick={() => { const p = { ...(myProfile.progress || {}) }; (task.objectives || []).forEach(obj => { delete p[`${myProfile.id}-${task.id}-${obj.id}`]; }); saveMyProfile({ ...myProfile, progress: p }); }} style={{ background: T.errorBg, border: `1px solid ${T.errorBorder}`, color: T.error, padding: "4px 8px", fontSize: T.fs1, cursor: "pointer", fontFamily: T.sans, letterSpacing: 0.5 }}>↩ UNDO</button>
+                    </div>
                   ) : (
                     <button onClick={() => added ? removeTask(task.id) : addTask(task.id)} style={{ background: added ? T.errorBg : "transparent", border: `1px solid ${added ? T.errorBorder : T.borderBright}`, color: added ? T.error : T.textDim, padding: "4px 8px", fontSize: T.fs3, cursor: "pointer", fontFamily: T.sans, flexShrink: 0 }}>{added ? "✕ REMOVE" : "+ ADD"}</button>
                   )}
