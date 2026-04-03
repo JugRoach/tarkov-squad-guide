@@ -36,8 +36,8 @@ function decodeProfile(code){try{const b64=code.trim().startsWith(CODE_VERSION+"
 function useStorage(key,def){const[val,setVal]=useState(def);const[ready,setReady]=useState(false);useEffect(()=>{(async()=>{try{const r=await window.storage.get(key);if(r?.value)setVal(JSON.parse(r.value));}catch(_){}setReady(true);})();},[key]);const save=useCallback((v)=>{setVal(p=>{const next=typeof v==="function"?v(p):v;(async()=>{try{await window.storage.set(key,JSON.stringify(next));}catch(_){}})();return next;});},[key]);return[val,save,ready];}
 
 // ─── API ─────────────────────────────────────────────────────────────────
-const MAPS_Q=`{maps{id name normalizedName lootContainers{lootContainer{name}}}}`;
-const TASKS_Q=`{tasks(lang:en){id name wikiLink minPlayerLevel trader{name} map{id name normalizedName} taskRequirements{task{id}status} objectives{id type description optional ...on TaskObjectiveBasic{zones{id map{id} position{x y z}}} ...on TaskObjectiveMark{markerItem{name} zones{id map{id} position{x y z}}} ...on TaskObjectiveQuestItem{questItem{name} count possibleLocations{map{id} positions{x y z}} zones{id map{id} position{x y z}}} ...on TaskObjectiveShoot{targetNames count zoneNames zones{id map{id} position{x y z}}} ...on TaskObjectiveItem{items{name} count foundInRaid zones{id map{id} position{x y z}}} ...on TaskObjectiveExtract{exitName}}}}`;
+const MAPS_Q=`{maps{id name normalizedName lootContainers{lootContainer{name} position{x y z}} bosses{boss{name} spawnChance spawnLocations{name chance} escorts{boss{name} amount{count}} spawnTime spawnTimeRandom spawnTrigger} hazards{hazardType position{x y z} outline{x y z}} locks{lockType key{name} needsPower position{x y z}} btrStops{name x y z} extracts{name faction position{x y z} switches{name}}}}`;
+const TASKS_Q=`{tasks(lang:en){id name wikiLink minPlayerLevel trader{name} map{id name normalizedName} taskRequirements{task{id}status} objectives{id type description optional ...on TaskObjectiveBasic{zones{id map{id} position{x y z}}} ...on TaskObjectiveMark{markerItem{name} zones{id map{id} position{x y z}}} ...on TaskObjectiveQuestItem{questItem{name} count possibleLocations{map{id} positions{x y z}} zones{id map{id} position{x y z}}} ...on TaskObjectiveShoot{targetNames count zoneNames zones{id map{id} position{x y z}}} ...on TaskObjectiveItem{items{name} count foundInRaid zones{id map{id} position{x y z}}} ...on TaskObjectiveExtract{exitName} ...on TaskObjectiveBuildItem{item{name} attributes{name requirement{value}}} ...on TaskObjectiveSkill{skillLevel{name level}} ...on TaskObjectiveTraderLevel{trader{name} level} ...on TaskObjectiveUseItem{useAny{name} count zoneNames zones{id map{id} position{x y z}}} ...on TaskObjectiveTaskStatus{task{name} status} ...on TaskObjectiveTraderStanding{trader{name} value compareMethod} ...on TaskObjectiveExperience{count} ...on TaskObjectivePlayerLevel{playerLevel}}}}`;
 const HIDEOUT_Q=`{hideoutStations{id name normalizedName levels{level itemRequirements{item{id name shortName} count} stationLevelRequirements{station{id name} level} traderRequirements{trader{name} level}}}}`;
 const TRADERS_Q=`{traders{id name imageLink}}`;
 async function fetchAPI(q){const r=await fetch(API_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:q})});return(await r.json()).data;}
@@ -493,7 +493,23 @@ const MAP_BOUNDS = {
 // ─── ROUTE UTILS ─────────────────────────────────────────────────────────
 function worldToPct(pos,bounds){if(!pos||!bounds)return null;const{left,right,top,bottom}=bounds;const gx=bounds.swap?pos.z:pos.x;const gz=bounds.swap?pos.x:pos.z;const x=(gx-left)/(right-left);const y=(gz-top)/(bottom-top);if(isNaN(x)||isNaN(y))return null;if(x<-0.05||x>1.05||y<-0.05||y>1.05)return null;return{x:Math.max(0.02,Math.min(0.98,x)),y:Math.max(0.02,Math.min(0.98,y))};}
 function nearestNeighbor(waypoints){if(!waypoints.length)return[];const origin={pct:{x:0.5,y:0.5}};const remaining=[...waypoints];const route=[];let cur=origin;while(remaining.length){const hasPos=remaining.some(w=>w.pct);if(!hasPos){route.push(...remaining);break;}let best=0,bestD=Infinity;remaining.forEach((w,i)=>{if(!w.pct)return;const d=Math.hypot(w.pct.x-cur.pct.x,w.pct.y-cur.pct.y);if(d<bestD){bestD=d;best=i;}});const next=remaining.splice(best,1)[0];route.push(next);if(next.pct)cur={pct:next.pct};}return route;}
-function getObjMeta(obj){const t=obj.type;if(t==="shoot")return{icon:"☠",color:"#e05a5a",summary:`Kill ${obj.count>1?obj.count+"× ":""}${obj.targetNames?.[0]||"enemy"}${obj.zoneNames?.length?" ("+obj.zoneNames[0]+")":""}`,isCountable:true,total:obj.count||1};if(t==="findItem"||t==="giveItem")return{icon:"◈",color:"#d4b84a",summary:`${obj.count>1?obj.count+"× ":""}${obj.items?.[0]?.name||"item"}${obj.foundInRaid?" (FIR)":""}`,isCountable:obj.count>1,total:obj.count||1};if(t==="findQuestItem"||t==="giveQuestItem")return{icon:"◈",color:"#d4b84a",summary:obj.questItem?.name||obj.description,isCountable:false,total:1};if(t==="visit"||t==="mark")return{icon:"◉",color:"#9a7aba",summary:obj.description,isCountable:false,total:1};if(t==="extract")return{icon:"⬆",color:"#5dba5d",summary:obj.exitName?`Extract via ${obj.exitName}`:"Extract from map",isCountable:false,total:1};return{icon:"♦",color:"#7a9a7a",summary:obj.description||t,isCountable:false,total:1};}
+function getObjMeta(obj){const t=obj.type;
+  if(t==="shoot")return{icon:"☠",color:"#e05a5a",summary:`Kill ${obj.count>1?obj.count+"× ":""}${obj.targetNames?.[0]||"enemy"}${obj.zoneNames?.length?" ("+obj.zoneNames[0]+")":""}`,isCountable:true,total:obj.count||1};
+  if(t==="findItem"||t==="giveItem"||t==="sellItem")return{icon:"◈",color:"#d4b84a",summary:`${obj.count>1?obj.count+"× ":""}${obj.items?.[0]?.name||"item"}${obj.foundInRaid?" (FIR)":""}`,isCountable:obj.count>1,total:obj.count||1};
+  if(t==="findQuestItem"||t==="giveQuestItem")return{icon:"◈",color:"#d4b84a",summary:obj.questItem?.name||obj.description,isCountable:false,total:1};
+  if(t==="visit")return{icon:"◉",color:"#9a7aba",summary:obj.description,isCountable:false,total:1};
+  if(t==="mark")return{icon:"⚑",color:"#9a7aba",summary:obj.markerItem?`Place ${obj.markerItem.name}`:obj.description,isCountable:false,total:1};
+  if(t==="plantItem"||t==="plantQuestItem")return{icon:"⬇",color:"#d4943a",summary:obj.description,isCountable:false,total:1};
+  if(t==="extract")return{icon:"⬆",color:"#5dba5d",summary:obj.exitName?`Extract via ${obj.exitName}`:"Extract from map",isCountable:false,total:1};
+  if(t==="buildWeapon")return{icon:"⚙",color:"#5a9aba",summary:obj.item?`Build ${obj.item.name}`:obj.description,isCountable:false,total:1};
+  if(t==="skill")return{icon:"▲",color:"#5aba8a",summary:obj.skillLevel?`${obj.skillLevel.name} lvl ${obj.skillLevel.level}`:obj.description,isCountable:false,total:1};
+  if(t==="traderLevel")return{icon:"★",color:"#c8a84b",summary:obj.trader?`${obj.trader.name} LL${obj.level}`:obj.description,isCountable:false,total:1};
+  if(t==="useItem")return{icon:"✦",color:"#d4943a",summary:obj.useAny?.[0]?`Use ${obj.useAny[0].name}${obj.zoneNames?.[0]?" at "+obj.zoneNames[0]:""}`:obj.description,isCountable:obj.count>1,total:obj.count||1};
+  if(t==="taskStatus")return{icon:"✓",color:"#5dba5d",summary:obj.task?`Complete ${obj.task.name}`:obj.description,isCountable:false,total:1};
+  if(t==="experience")return{icon:"◆",color:"#5aba8a",summary:obj.description,isCountable:false,total:obj.count||1};
+  if(t==="traderStanding")return{icon:"★",color:"#c8a84b",summary:obj.trader?`${obj.trader.name} rep ${obj.compareMethod||"≥"} ${obj.value}`:obj.description,isCountable:false,total:1};
+  if(t==="playerLevel")return{icon:"◆",color:"#5aba8a",summary:obj.playerLevel?`Reach level ${obj.playerLevel}`:obj.description,isCountable:false,total:1};
+  return{icon:"♦",color:"#7a9a7a",summary:obj.description||t,isCountable:false,total:1};}
 
 // ─── PREREQUISITE HELPERS ─────────────────────────────────────────────────
 function getAllPrereqTaskIds(taskId, apiTasks, visited = new Set()) {
@@ -1287,19 +1303,79 @@ function ExtractSelector({ player, mapData, faction, choice, onChoice }) {
 
 // ─── MAP OVERLAY ─────────────────────────────────────────────────────────
 const MAP_SVG_NAMES = {customs:"Customs",factory:"Factory",woods:"Woods",interchange:"Interchange",shoreline:"Shoreline",reserve:"Reserve",lighthouse:"Lighthouse","streets-of-tarkov":"StreetsOfTarkov","the-lab":"Labs","ground-zero":"GroundZero"};
+const LAYER_DEFS = [
+  { id: "route", label: "Route", icon: "━", default: true },
+  { id: "bosses", label: "Bosses", icon: "☠", default: true },
+  { id: "hazards", label: "Hazards", icon: "⚠", default: false },
+  { id: "stashes", label: "Stashes", icon: "◉", default: false },
+  { id: "locks", label: "Locks", icon: "⚿", default: false },
+  { id: "btr", label: "BTR", icon: "▣", default: false },
+];
 function MapOverlay({ apiMap, emap, route, conflicts, onConflictResolve }) {
   const [imgLoaded, setImgLoaded] = useState(false);
   const [imgErr, setImgErr] = useState(false);
   const [hoveredNode, setHoveredNode] = useState(null);
+  const [layers, setLayers] = useState(() => {
+    const d = {};
+    LAYER_DEFS.forEach(l => { d[l.id] = l.default; });
+    return d;
+  });
+  const toggleLayer = id => setLayers(prev => ({ ...prev, [id]: !prev[id] }));
   const mapRef = useRef(null);
+  const bounds = apiMap ? MAP_BOUNDS[apiMap.normalizedName] : null;
   const svgName = apiMap ? MAP_SVG_NAMES[apiMap.normalizedName] : null;
   const svgUrl = svgName ? `https://assets.tarkov.dev/maps/svg/${svgName}.svg` : null;
   const objWaypoints = route.filter(w => w.pct && !w.isExtract);
   const extractWaypoints = route.filter(w => w.pct && w.isExtract);
   const allPositioned = route.filter(w => w.pct);
 
+  // Pre-compute layer data positions
+  const bossMarkers = (apiMap?.bosses || []).map(b => {
+    const loc = b.spawnLocations?.[0];
+    // Boss spawn locations don't have x/y/z — they're named zones. We'll show them as a list instead of map pins.
+    return { name: b.boss?.name, chance: Math.round((b.spawnChance || 0) * 100), locations: (b.spawnLocations || []).map(l => ({ name: l.name, chance: Math.round((l.chance || 0) * 100) })), escorts: b.escorts || [], trigger: b.spawnTrigger };
+  }).filter(b => b.chance > 0);
+
+  const hazardPolys = (apiMap?.hazards || []).filter(h => h.outline?.length > 2).map(h => ({
+    type: h.hazardType,
+    points: h.outline.map(p => worldToPct(p, bounds)).filter(Boolean),
+  })).filter(h => h.points.length > 2);
+
+  const stashMarkers = (apiMap?.lootContainers || []).filter(c =>
+    c.lootContainer?.name && (c.lootContainer.name.includes("Buried barrel") || c.lootContainer.name.includes("Ground cache")) && c.position
+  ).map(c => ({ pct: worldToPct(c.position, bounds), name: c.lootContainer.name })).filter(c => c.pct);
+
+  const lockMarkers = (apiMap?.locks || []).filter(l => l.position && l.key?.name).map(l => ({
+    pct: worldToPct(l.position, bounds), key: l.key.name, needsPower: l.needsPower, type: l.lockType,
+  })).filter(l => l.pct);
+
+  const btrMarkers = (apiMap?.btrStops || []).map(s => ({
+    pct: worldToPct({ x: s.x, y: 0, z: s.z }, bounds), name: s.name,
+  })).filter(s => s.pct);
+
+  const hasLayerData = (id) => {
+    if (id === "bosses") return bossMarkers.length > 0;
+    if (id === "hazards") return hazardPolys.length > 0;
+    if (id === "stashes") return stashMarkers.length > 0;
+    if (id === "locks") return lockMarkers.length > 0;
+    if (id === "btr") return btrMarkers.length > 0;
+    return true;
+  };
+
   return (
     <div>
+      {/* Layer toggles */}
+      <div style={{ display: "flex", gap: 4, marginBottom: 6, flexWrap: "wrap" }}>
+        {LAYER_DEFS.filter(l => hasLayerData(l.id)).map(l => (
+          <button key={l.id} onClick={() => toggleLayer(l.id)}
+            style={{ background: layers[l.id] ? (l.id === "bosses" ? "#2a1414" : l.id === "hazards" ? "#2a2014" : l.id === "stashes" ? "#142a14" : l.id === "locks" ? "#2a2a14" : l.id === "btr" ? "#141a2a" : T.gold + "22") : "transparent",
+              border: `1px solid ${layers[l.id] ? (l.id === "bosses" ? "#5a2020" : l.id === "hazards" ? "#5a4020" : l.id === "stashes" ? "#2a5a2a" : l.id === "locks" ? "#5a5a20" : l.id === "btr" ? "#2a4060" : T.gold) : T.border}`,
+              color: layers[l.id] ? (l.id === "bosses" ? T.error : l.id === "hazards" ? T.orange : l.id === "stashes" ? T.success : l.id === "locks" ? "#d4b84a" : l.id === "btr" ? T.blue : T.gold) : T.textDim,
+              padding: "4px 8px", fontSize: T.fs1, cursor: "pointer", fontFamily: T.sans, letterSpacing: 0.5 }}>
+            {l.icon} {l.label}
+          </button>
+        ))}
+      </div>
       <div ref={mapRef} style={{ position: "relative", background: "#181818", border: `1px solid ${T.border}` }}>
         {hoveredNode && (
           <div style={{ position: "absolute", left: hoveredNode.x + 12, top: hoveredNode.y - 28, background: "rgba(13,17,23,0.95)", border: `1px solid ${T.borderBright}`, color: T.textBright, padding: "4px 8px", fontSize: T.fs2, fontFamily: T.mono, whiteSpace: "nowrap", pointerEvents: "none", zIndex: 10 }}>{hoveredNode.label}</div>
@@ -1319,28 +1395,67 @@ function MapOverlay({ apiMap, emap, route, conflicts, onConflictResolve }) {
                     <text x={lp.pct.x + 0.002} y={lp.pct.y - 0.007} fill={T.textDim} fontSize="0.011" fontFamily={T.mono}>{lp.name}</text>
                   </g>
                 ))}
-                {/* Route path through objectives */}
-                {objWaypoints.length > 1 && (
+                {/* ── LAYER: Hazard zones ── */}
+                {layers.hazards && hazardPolys.map((h, i) => (
+                  <polygon key={`hz_${i}`} points={h.points.map(p => `${p.x},${p.y}`).join(" ")}
+                    fill={h.type === "minefield" ? "rgba(224,90,90,0.15)" : h.type === "sniper" ? "rgba(208,148,58,0.15)" : "rgba(180,90,224,0.15)"}
+                    stroke={h.type === "minefield" ? "#e05a5a" : h.type === "sniper" ? "#d4943a" : "#b45ae0"}
+                    strokeWidth="0.002" strokeDasharray={h.type === "minefield" ? "0.008,0.004" : "none"} opacity="0.7" />
+                ))}
+                {/* ── LAYER: Stash markers ── */}
+                {layers.stashes && stashMarkers.map((s, i) => (
+                  <g key={`st_${i}`} style={{ pointerEvents: "auto", cursor: "pointer" }}
+                    onMouseEnter={e => { const r = mapRef.current?.getBoundingClientRect(); if (r) setHoveredNode({ label: s.name, x: e.clientX - r.left, y: e.clientY - r.top }); }}
+                    onMouseMove={e => { const r = mapRef.current?.getBoundingClientRect(); if (r) setHoveredNode(h => h ? { ...h, x: e.clientX - r.left, y: e.clientY - r.top } : h); }}
+                    onMouseLeave={() => setHoveredNode(null)}>
+                    <circle cx={s.pct.x} cy={s.pct.y} r="0.008" fill={T.successBg} stroke={T.success} strokeWidth="0.002" />
+                  </g>
+                ))}
+                {/* ── LAYER: Lock markers ── */}
+                {layers.locks && lockMarkers.map((l, i) => (
+                  <g key={`lk_${i}`} style={{ pointerEvents: "auto", cursor: "pointer" }}
+                    onMouseEnter={e => { const r = mapRef.current?.getBoundingClientRect(); if (r) setHoveredNode({ label: `${l.key}${l.needsPower ? " (needs power)" : ""}`, x: e.clientX - r.left, y: e.clientY - r.top }); }}
+                    onMouseMove={e => { const r = mapRef.current?.getBoundingClientRect(); if (r) setHoveredNode(h => h ? { ...h, x: e.clientX - r.left, y: e.clientY - r.top } : h); }}
+                    onMouseLeave={() => setHoveredNode(null)}>
+                    <rect x={l.pct.x - 0.006} y={l.pct.y - 0.006} width="0.012" height="0.012" rx="0.002"
+                      fill={l.needsPower ? T.orangeBg : "#2a2a14"} stroke={l.needsPower ? T.orange : "#d4b84a"} strokeWidth="0.002" />
+                  </g>
+                ))}
+                {/* ── LAYER: BTR stops ── */}
+                {layers.btr && btrMarkers.map((b, i) => (
+                  <g key={`btr_${i}`} style={{ pointerEvents: "auto", cursor: "pointer" }}
+                    onMouseEnter={e => { const r = mapRef.current?.getBoundingClientRect(); if (r) setHoveredNode({ label: `BTR: ${b.name}`, x: e.clientX - r.left, y: e.clientY - r.top }); }}
+                    onMouseMove={e => { const r = mapRef.current?.getBoundingClientRect(); if (r) setHoveredNode(h => h ? { ...h, x: e.clientX - r.left, y: e.clientY - r.top } : h); }}
+                    onMouseLeave={() => setHoveredNode(null)}>
+                    <rect x={b.pct.x - 0.009} y={b.pct.y - 0.009} width="0.018" height="0.018" rx="0.003"
+                      fill={T.blueBg} stroke={T.blue} strokeWidth="0.002" />
+                    <text x={b.pct.x} y={b.pct.y + 0.005} textAnchor="middle" fill={T.blue} fontSize="0.012" fontFamily={T.mono}>B</text>
+                  </g>
+                ))}
+                {/* ── LAYER: Route ── */}
+                {layers.route && objWaypoints.length > 1 && (
                   <polyline points={objWaypoints.map(w => `${w.pct.x},${w.pct.y}`).join(" ")}
                     fill="none" stroke={T.gold} strokeWidth="0.005" strokeDasharray="0.018,0.009" opacity="0.85" />
                 )}
                 {/* Spawn to first */}
-                {objWaypoints[0] && (
+                {layers.route && objWaypoints[0] && (
                   <line x1="0.5" y1="0.5" x2={objWaypoints[0].pct.x} y2={objWaypoints[0].pct.y}
                     stroke={T.success} strokeWidth="0.004" strokeDasharray="0.015,0.008" opacity="0.7" />
                 )}
                 {/* Last obj to extract */}
-                {objWaypoints.length > 0 && extractWaypoints[0] && (
+                {layers.route && objWaypoints.length > 0 && extractWaypoints[0] && (
                   <line
                     x1={objWaypoints[objWaypoints.length-1].pct.x} y1={objWaypoints[objWaypoints.length-1].pct.y}
                     x2={extractWaypoints[0].pct.x} y2={extractWaypoints[0].pct.y}
                     stroke={T.success} strokeWidth="0.005" strokeDasharray="0.02,0.01" opacity="0.8" />
                 )}
                 {/* Spawn marker */}
-                <circle cx="0.5" cy="0.5" r="0.018" fill={T.successBg} stroke={T.success} strokeWidth="0.004" />
-                <text x="0.5" y="0.507" textAnchor="middle" fill={T.success} fontSize="0.017" fontFamily={T.mono} fontWeight="bold">S</text>
+                {layers.route && <>
+                  <circle cx="0.5" cy="0.5" r="0.018" fill={T.successBg} stroke={T.success} strokeWidth="0.004" />
+                  <text x="0.5" y="0.507" textAnchor="middle" fill={T.success} fontSize="0.017" fontFamily={T.mono} fontWeight="bold">S</text>
+                </>}
                 {/* Objective waypoints */}
-                {objWaypoints.map((w, i) => {
+                {layers.route && objWaypoints.map((w, i) => {
                   const col = w.players[0]?.color || T.gold;
                   return (
                     <g key={w.id} style={{ pointerEvents: "auto", cursor: "pointer" }}
@@ -1357,7 +1472,7 @@ function MapOverlay({ apiMap, emap, route, conflicts, onConflictResolve }) {
                   );
                 })}
                 {/* Extract waypoints — green, with ⬆ symbol */}
-                {extractWaypoints.map((w) => (
+                {layers.route && extractWaypoints.map((w) => (
                   <g key={w.id} style={{ pointerEvents: "auto", cursor: "pointer" }}
                     onMouseEnter={e => { const r = mapRef.current?.getBoundingClientRect(); if (r) setHoveredNode({ label: w.locationName, x: e.clientX - r.left, y: e.clientY - r.top }); }}
                     onMouseMove={e => { const r = mapRef.current?.getBoundingClientRect(); if (r) setHoveredNode(h => h ? { ...h, x: e.clientX - r.left, y: e.clientY - r.top } : h); }}
@@ -1376,6 +1491,44 @@ function MapOverlay({ apiMap, emap, route, conflicts, onConflictResolve }) {
           </div>
         )}
       </div>
+
+      {/* Boss intel panel */}
+      {layers.bosses && bossMarkers.length > 0 && (
+        <div style={{ background: "#1f1414", border: `1px solid #4a2020`, borderLeft: `2px solid ${T.error}`, padding: 10, marginTop: 8 }}>
+          <div style={{ fontSize: T.fs3, color: T.error, letterSpacing: 1, marginBottom: 6 }}>☠ BOSS INTEL</div>
+          {bossMarkers.map((b, i) => (
+            <div key={i} style={{ marginBottom: i < bossMarkers.length - 1 ? 6 : 0 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ color: T.textBright, fontSize: T.fs2, fontWeight: "bold" }}>{b.name}</span>
+                <span style={{ color: b.chance >= 50 ? T.error : T.orange, fontSize: T.fs2, fontFamily: T.sans }}>{b.chance}%</span>
+              </div>
+              {b.locations.length > 0 && (
+                <div style={{ fontSize: T.fs1, color: T.textDim, marginTop: 2 }}>
+                  {b.locations.map(l => `${l.name}${l.chance < 100 ? ` (${l.chance}%)` : ""}`).join(" · ")}
+                </div>
+              )}
+              {b.escorts.length > 0 && (
+                <div style={{ fontSize: T.fs1, color: T.textDim, marginTop: 1 }}>
+                  +{b.escorts.map(e => `${e.amount?.[0]?.count || "?"}× ${e.boss?.name || "guard"}`).join(", ")}
+                </div>
+              )}
+              {b.trigger && <div style={{ fontSize: T.fs1, color: T.orange, marginTop: 1 }}>Trigger: {b.trigger}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Hazard legend */}
+      {layers.hazards && hazardPolys.length > 0 && (
+        <div style={{ background: T.orangeBg, border: `1px solid ${T.orangeBorder}`, borderLeft: `2px solid ${T.orange}`, padding: 8, marginTop: 6 }}>
+          <div style={{ fontSize: T.fs1, color: T.orange }}>
+            ⚠ {hazardPolys.filter(h => h.type === "minefield").length > 0 && <span style={{ color: T.error }}>Red = minefields</span>}
+            {hazardPolys.filter(h => h.type === "minefield").length > 0 && hazardPolys.filter(h => h.type === "sniper").length > 0 && " · "}
+            {hazardPolys.filter(h => h.type === "sniper").length > 0 && <span style={{ color: T.orange }}>Orange = sniper zones</span>}
+            {" — "}{hazardPolys.length} zones shown
+          </div>
+        </div>
+      )}
 
       {/* Conflicts */}
       {conflicts.map(c => (
@@ -1660,6 +1813,15 @@ function MyProfileTab({ myProfile, saveMyProfile, apiTasks, apiTraders, loading,
           {(() => {
             const myPrereqIds = new Set();
             (myProfile.tasks || []).forEach(({ taskId }) => { getAllPrereqTaskIds(taskId, apiTasks).forEach(id => myPrereqIds.add(id)); });
+            // Count how many tasks each task unlocks
+            const unlocksMap = {};
+            (apiTasks || []).forEach(t => {
+              (t.taskRequirements || []).forEach(req => {
+                if (req.status?.includes("complete") && req.task?.id) {
+                  unlocksMap[req.task.id] = (unlocksMap[req.task.id] || 0) + 1;
+                }
+              });
+            });
             return browseTasks.map(task => {
             const added = myProfile.tasks?.some(t => t.taskId === task.id);
             const prereqDone = !added && myPrereqIds.has(task.id);
@@ -1677,8 +1839,11 @@ function MyProfileTab({ myProfile, saveMyProfile, apiTasks, apiTraders, loading,
                   {taskTrader === "all" && <Badge label={task.trader?.name || "?"} color={T.textDim} />}
                   {task.map && <Badge label={task.map.name} color={T.blue} />}
                   {task.minPlayerLevel > 1 && <Badge label={`Lvl ${task.minPlayerLevel}+`} color={T.textDim} />}
+                  <Badge label={`${(task.objectives || []).filter(o => !o.optional).length} obj`} color={T.textDim} />
+                  {unlocksMap[task.id] > 0 && <Badge label={`unlocks ${unlocksMap[task.id]}`} color={T.cyan} />}
+                  {(task.objectives || []).some(o => o.zones?.length > 0 || o.possibleLocations?.length > 0) && <Badge label="has pins" color={T.success} />}
                 </div>
-                {task.objectives?.slice(0, 2).map(obj => <div key={obj.id} style={{ fontSize: T.fs3, color: T.textDim, marginTop: 2 }}>{getObjMeta(obj).icon} {obj.description}</div>)}
+                {task.objectives?.filter(o => !o.optional).slice(0, 2).map(obj => <div key={obj.id} style={{ fontSize: T.fs3, color: T.textDim, marginTop: 2 }}>{getObjMeta(obj).icon} {obj.description}</div>)}
               </div>
             );
           });
@@ -2394,7 +2559,7 @@ function SquadTab({ myProfile, saveMyProfile, apiMaps, apiTasks, apiTraders, loa
   const [resolvedConflicts, setResolvedConflicts] = useState({});
   const [screen, setScreen] = useState("squad");
   const [routeMode, setRouteMode] = useState("tasks"); // "tasks" or "loot"
-  const [lootSubMode, setLootSubMode] = useState("all"); // "all", "hideout", "equipment"
+  const [lootSubMode, setLootSubMode] = useState("all"); // "all", "hideout", "equipment", "stashes"
   const [targetEquipment, saveTargetEquipment] = useStorage("tg-target-equipment-v1", []); // [{id, name, shortName, categories}]
   const [equipSearch, setEquipSearch] = useState("");
   const [equipResults, setEquipResults] = useState(null);
@@ -2551,18 +2716,32 @@ function SquadTab({ myProfile, saveMyProfile, apiMaps, apiTasks, apiTraders, loa
     let newConflicts = [];
 
     if (routeMode === "loot") {
-      // Loot mode: route through filtered loot points
-      const filteredLP = getFilteredLootPoints(emap.lootPoints);
-      positioned = filteredLP.map((lp, i) => {
-        const lc = LOOT_CONFIG[lp.type] || LOOT_CONFIG.mixed;
-        return {
-          id: `loot_${i}`,
-          pct: lp.pct,
-          locationName: lp.name,
-          isLoot: true,
-          players: [{ playerId: "loot", name: lp.note, color: lc.color, objective: `${lc.icon} ${lc.label}`, isCountable: false, total: 1, progress: 0 }],
-        };
-      });
+      if (lootSubMode === "stashes") {
+        // Stash run: route through hidden stashes from API data
+        const bounds = MAP_BOUNDS[selectedMapNorm] || null;
+        const stashes = (selectedMap?.lootContainers || []).filter(c =>
+          c.lootContainer?.name && (c.lootContainer.name.includes("Buried barrel") || c.lootContainer.name.includes("Ground cache")) && c.position
+        ).map((c, i) => {
+          const pct = worldToPct(c.position, bounds);
+          return pct ? { id: `stash_${i}`, pct, locationName: c.lootContainer.name, isLoot: true,
+            players: [{ playerId: "stash", name: "Hidden stash", color: T.success, objective: `◉ ${c.lootContainer.name}`, isCountable: false, total: 1, progress: 0 }],
+          } : null;
+        }).filter(Boolean);
+        positioned = stashes;
+      } else {
+        // Loot mode: route through filtered loot points
+        const filteredLP = getFilteredLootPoints(emap.lootPoints);
+        positioned = filteredLP.map((lp, i) => {
+          const lc = LOOT_CONFIG[lp.type] || LOOT_CONFIG.mixed;
+          return {
+            id: `loot_${i}`,
+            pct: lp.pct,
+            locationName: lp.name,
+            isLoot: true,
+            players: [{ playerId: "loot", name: lp.note, color: lc.color, objective: `${lc.icon} ${lc.label}`, isCountable: false, total: 1, progress: 0 }],
+          };
+        });
+      }
     } else {
       // Task mode: existing behavior
       const bounds = MAP_BOUNDS[selectedMapNorm] || null;
@@ -2666,7 +2845,7 @@ function SquadTab({ myProfile, saveMyProfile, apiMaps, apiTasks, apiTraders, loa
       <div style={{ background: T.surface, borderBottom: `1px solid ${T.border}`, padding: "10px 14px", flexShrink: 0 }}>
         <button onClick={() => setScreen("squad")} style={{ background: "transparent", border: "none", color: T.textDim, fontSize: T.fs3, letterSpacing: 1, cursor: "pointer", fontFamily: T.sans, padding: 0, marginBottom: 6 }}>← BACK TO PLANNER</button>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div style={{ fontSize: T.fs4, color: T.gold, fontWeight: "bold" }}>{selectedMap?.name} — {routeMode === "loot" ? (lootSubMode === "hideout" ? "Hideout Run" : lootSubMode === "equipment" ? "Equipment Run" : "Loot Run") : "Squad Route"}</div>
+          <div style={{ fontSize: T.fs4, color: T.gold, fontWeight: "bold" }}>{selectedMap?.name} — {routeMode === "loot" ? (lootSubMode === "hideout" ? "Hideout Run" : lootSubMode === "equipment" ? "Equipment Run" : lootSubMode === "stashes" ? "Stash Run" : "Loot Run") : "Squad Route"}</div>
           <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <Tip text="After your raid, tap POST-RAID to log kills and items found. This updates your progress so your next share code reflects what's done." />
             <button onClick={() => setScreen("postraid")} style={{ background: T.success + "22", border: `1px solid ${T.successBorder}`, color: T.success, padding: "6px 12px", fontSize: T.fs3, cursor: "pointer", fontFamily: T.sans, letterSpacing: 1 }}>POST-RAID ▶</button>
@@ -3355,6 +3534,7 @@ function SquadTab({ myProfile, saveMyProfile, apiMaps, apiTasks, apiTraders, loa
             <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
               {[
                 {id:"all",label:"ALL LOOT",color:T.purple},
+                {id:"stashes",label:"STASHES",color:T.success},
                 {id:"hideout",label:"HIDEOUT",color:T.cyan,disabled:!hasHideout},
                 {id:"equipment",label:"EQUIPMENT",color:T.orange},
               ].map(m => (
@@ -3369,6 +3549,18 @@ function SquadTab({ myProfile, saveMyProfile, apiMaps, apiTasks, apiTraders, loa
             </div>
 
             {/* Hideout mode info */}
+            {lootSubMode === "stashes" && (() => {
+              const stashCount = (selectedMap?.lootContainers || []).filter(c =>
+                c.lootContainer?.name && (c.lootContainer.name.includes("Buried barrel") || c.lootContainer.name.includes("Ground cache")) && c.position
+              ).length;
+              const hasBounds = selectedMapNorm && MAP_BOUNDS[selectedMapNorm];
+              return (
+                <div style={{ background: T.successBg, border: `1px solid ${T.successBorder}`, borderLeft: `2px solid ${T.success}`, padding: "8px 10px", marginBottom: 8 }}>
+                  <div style={{ fontSize: T.fs2, color: T.success }}>◉ {stashCount} hidden stashes on {selectedMap?.name || "this map"}</div>
+                  <div style={{ fontSize: T.fs1, color: T.textDim, marginTop: 2 }}>Route will hit every stash with nearest-neighbor optimization.{!hasBounds ? " Map coordinates unavailable — stashes may not render on map." : ""}</div>
+                </div>
+              );
+            })()}
             {lootSubMode === "hideout" && !hasHideout && (
               <div style={{ background: T.surface, border: `1px dashed ${T.border}`, padding: 10, marginBottom: 8, textAlign: "center" }}>
                 <div style={{ fontSize: T.fs3, color: T.textDim }}>Set a hideout target in My Profile → Hideout first.</div>
@@ -3524,10 +3716,62 @@ function SquadTab({ myProfile, saveMyProfile, apiMaps, apiTasks, apiTraders, loa
           </div>
         )}
 
+        {/* Pre-raid checklist */}
+        {routeMode === "tasks" && selectedMapId && (() => {
+          const bringItems = [];
+          const selectedMap = apiMaps?.find(m => m.id === selectedMapId);
+          const mapLocks = selectedMap?.locks || [];
+          // Collect items from selected task objectives
+          [...activeIds].forEach(pid => {
+            (priorityTasks[pid] || []).forEach(taskId => {
+              const apiTask = apiTasks?.find(t => t.id === taskId);
+              if (!apiTask) return;
+              (apiTask.objectives || []).forEach(obj => {
+                if (obj.optional) return;
+                if ((obj.type === "mark") && obj.markerItem?.name) {
+                  if (!bringItems.some(b => b.name === obj.markerItem.name)) bringItems.push({ name: obj.markerItem.name, type: "marker", icon: "⚑", color: "#9a7aba" });
+                }
+                if ((obj.type === "plantItem" || obj.type === "plantQuestItem") && obj.description) {
+                  const match = obj.description.match(/(?:plant|place|hide|stash|install|set up|deploy)\s+(?:the\s+)?(.+?)(?:\s+(?:in|on|at|near|next|inside|behind|under))/i);
+                  if (match) {
+                    const itemName = match[1].replace(/^(?:a|an|the)\s+/i, "");
+                    if (!bringItems.some(b => b.name === itemName)) bringItems.push({ name: itemName, type: "plant", icon: "⬇", color: "#d4943a" });
+                  }
+                }
+                if (obj.type === "useItem" && obj.useAny?.[0]?.name) {
+                  if (!bringItems.some(b => b.name === obj.useAny[0].name)) bringItems.push({ name: obj.useAny[0].name, type: "use", icon: "✦", color: "#d4943a" });
+                }
+              });
+            });
+          });
+          // Keys for this map
+          const uniqueKeys = [...new Set(mapLocks.map(l => l.key?.name).filter(Boolean))].sort();
+          if (bringItems.length === 0 && uniqueKeys.length === 0) return null;
+          return (
+            <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderLeft: `2px solid ${T.cyan}`, padding: 10, marginBottom: 10 }}>
+              <div style={{ fontSize: T.fs3, color: T.cyan, letterSpacing: 1, marginBottom: 6 }}>🎒 PRE-RAID CHECKLIST<Tip text="Items you'll need for your selected tasks. Check you have these before entering the raid." /></div>
+              {bringItems.map((item, i) => (
+                <div key={i} style={{ fontSize: T.fs2, color: item.color, marginBottom: 3 }}>
+                  <span>{item.icon}</span> {item.name} <span style={{ color: T.textDim, fontSize: T.fs1 }}>({item.type})</span>
+                </div>
+              ))}
+              {uniqueKeys.length > 0 && (
+                <details style={{ marginTop: bringItems.length > 0 ? 6 : 0 }}>
+                  <summary style={{ fontSize: T.fs2, color: "#d4b84a", cursor: "pointer", fontFamily: T.sans }}>⚿ {uniqueKeys.length} locked rooms on this map</summary>
+                  <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 4 }}>
+                    {uniqueKeys.slice(0, 20).map(k => <span key={k} style={{ fontSize: T.fs1, color: T.textDim, background: "#1a1a14", border: `1px solid #3a3a20`, padding: "2px 6px" }}>{k}</span>)}
+                    {uniqueKeys.length > 20 && <span style={{ fontSize: T.fs1, color: T.textDim }}>+{uniqueKeys.length - 20} more</span>}
+                  </div>
+                </details>
+              )}
+            </div>
+          );
+        })()}
+
         {/* Generate */}
         <button onClick={generateRoute} disabled={!canGenerate}
           style={{ width: "100%", background: canGenerate ? (routeMode === "loot" ? T.purple : T.gold) : "transparent", color: canGenerate ? T.bg : T.textDim, border: `2px solid ${canGenerate ? (routeMode === "loot" ? T.purple : T.gold) : T.border}`, padding: `${T.sp3}px 0`, fontSize: T.fs4, letterSpacing: 1.5, cursor: canGenerate ? "pointer" : "default", fontFamily: T.sans, textTransform: "uppercase", fontWeight: "bold", marginBottom: T.sp2, transition: "background 0.15s, border-color 0.15s" }}>
-          ▶ {routeMode === "loot" ? (lootSubMode === "hideout" ? "GENERATE HIDEOUT RUN" : lootSubMode === "equipment" ? "GENERATE EQUIPMENT RUN" : "GENERATE LOOT RUN") : "GENERATE ROUTE"}{activeIds.size > 0 ? ` — ${activeIds.size} PLAYER${activeIds.size > 1 ? "S" : ""}` : ""}
+          ▶ {routeMode === "loot" ? (lootSubMode === "hideout" ? "GENERATE HIDEOUT RUN" : lootSubMode === "equipment" ? "GENERATE EQUIPMENT RUN" : lootSubMode === "stashes" ? "GENERATE STASH RUN" : "GENERATE LOOT RUN") : "GENERATE ROUTE"}{activeIds.size > 0 ? ` — ${activeIds.size} PLAYER${activeIds.size > 1 ? "S" : ""}` : ""}
         </button>
         {!selectedMapId && <div style={{ fontSize: T.fs3, color: T.textDim, textAlign: "center", fontFamily: T.sans, marginBottom: 4 }}>Select a map above to get started</div>}
         {routeMode === "tasks" && selectedMapId && activeIds.size > 0 && ![...activeIds].some(id => (priorityTasks[id] || []).length > 0) && <div style={{ fontSize: T.fs3, color: T.textDim, textAlign: "center", fontFamily: T.sans, marginBottom: 4 }}>Select a priority task for at least one active player</div>}
