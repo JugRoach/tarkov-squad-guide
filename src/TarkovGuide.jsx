@@ -36,7 +36,7 @@ function decodeProfile(code){try{const b64=code.trim().startsWith(CODE_VERSION+"
 function useStorage(key,def){const[val,setVal]=useState(def);const[ready,setReady]=useState(false);useEffect(()=>{(async()=>{try{const r=await window.storage.get(key);if(r?.value)setVal(JSON.parse(r.value));}catch(_){}setReady(true);})();},[key]);const save=useCallback((v)=>{setVal(p=>{const next=typeof v==="function"?v(p):v;(async()=>{try{await window.storage.set(key,JSON.stringify(next));}catch(_){}})();return next;});},[key]);return[val,save,ready];}
 
 // ─── API ─────────────────────────────────────────────────────────────────
-const MAPS_Q=`{maps{id name normalizedName lootContainers{lootContainer{name} position{x y z}} bosses{boss{name} spawnChance spawnLocations{name chance} escorts{boss{name} amount{count}} spawnTime spawnTimeRandom spawnTrigger} hazards{hazardType position{x y z} outline{x y z}} locks{lockType key{name} needsPower position{x y z}} btrStops{name x y z} extracts{name faction position{x y z} switches{name}}}}`;
+const MAPS_Q=`{maps{id name normalizedName lootContainers{lootContainer{name} position{x y z}} bosses{boss{name} spawnChance spawnLocations{name chance} escorts{boss{name} amount{count}} spawnTime spawnTimeRandom spawnTrigger} hazards{hazardType position{x y z} outline{x y z}} locks{lockType key{name} needsPower position{x y z}} btrStops{name x y z} extracts{name faction position{x y z} switches{name}} transits{description map{normalizedName name}}}}`;
 const TASKS_Q=`{tasks(lang:en){id name wikiLink minPlayerLevel trader{name} map{id name normalizedName} taskRequirements{task{id}status} objectives{id type description optional ...on TaskObjectiveBasic{zones{id map{id} position{x y z}}} ...on TaskObjectiveMark{markerItem{name} zones{id map{id} position{x y z}}} ...on TaskObjectiveQuestItem{questItem{name} count possibleLocations{map{id} positions{x y z}} zones{id map{id} position{x y z}}} ...on TaskObjectiveShoot{targetNames count zoneNames zones{id map{id} position{x y z}}} ...on TaskObjectiveItem{items{name} count foundInRaid zones{id map{id} position{x y z}}} ...on TaskObjectiveExtract{exitName} ...on TaskObjectiveBuildItem{item{name} attributes{name requirement{value}}} ...on TaskObjectiveSkill{skillLevel{name level}} ...on TaskObjectiveTraderLevel{trader{name} level} ...on TaskObjectiveUseItem{useAny{name} count zoneNames zones{id map{id} position{x y z}}} ...on TaskObjectiveTaskStatus{task{name} status} ...on TaskObjectiveTraderStanding{trader{name} value compareMethod} ...on TaskObjectiveExperience{count} ...on TaskObjectivePlayerLevel{playerLevel}}}}`;
 const HIDEOUT_Q=`{hideoutStations{id name normalizedName levels{level itemRequirements{item{id name shortName} count} stationLevelRequirements{station{id name} level} traderRequirements{trader{name} level}}}}`;
 const TRADERS_Q=`{traders{id name imageLink}}`;
@@ -489,6 +489,24 @@ const MAP_BOUNDS = {
   "the-lab":           {left:-477,right:-193,top:-287,bottom:-80,swap:true},
   "ground-zero":       {left:249,right:-99,top:-124,bottom:364},
 };
+
+// ─── EXTRACT POSITION MERGE ──────────────────────────────────────────────
+function mergeExtractPositions(emapEntry, apiMap) {
+  if (!emapEntry || !apiMap?.extracts?.length) return emapEntry;
+  const bounds = MAP_BOUNDS[emapEntry.id];
+  if (!bounds) return emapEntry;
+  const apiByName = {};
+  apiMap.extracts.forEach(e => { if (e.position) apiByName[e.name] = e; });
+  const updateExtracts = (list) => list.map(ext => {
+    const api = apiByName[ext.name];
+    if (api?.position) {
+      const pct = worldToPct(api.position, bounds);
+      if (pct) return { ...ext, pct };
+    }
+    return ext;
+  });
+  return { ...emapEntry, pmcExtracts: updateExtracts(emapEntry.pmcExtracts || []), scavExtracts: updateExtracts(emapEntry.scavExtracts || []) };
+}
 
 // ─── ROUTE UTILS ─────────────────────────────────────────────────────────
 function worldToPct(pos,bounds){if(!pos||!bounds)return null;const{left,right,top,bottom}=bounds;const gx=bounds.swap?pos.z:pos.x;const gz=bounds.swap?pos.x:pos.z;const x=(gx-left)/(right-left);const y=(gz-top)/(bottom-top);if(isNaN(x)||isNaN(y))return null;if(x<-0.05||x>1.05||y<-0.05||y>1.05)return null;return{x:Math.max(0.02,Math.min(0.98,x)),y:Math.max(0.02,Math.min(0.98,y))};}
@@ -1556,10 +1574,33 @@ function MapOverlay({ apiMap, emap, route, conflicts, onConflictResolve }) {
       )}
 
       {/* Route sequence */}
-      {(objWaypoints.length > 0 || extractWaypoints.length > 0) && (
+      {(objWaypoints.length > 0 || extractWaypoints.length > 0) && (() => {
+        // Pre-compute nearby lock names per waypoint for inline callouts
+        const wpLockInfo = objWaypoints.map(w => {
+          if (!w.pct || !bounds) return [];
+          return lockMarkers.filter(l => Math.hypot(l.pct.x - w.pct.x, l.pct.y - w.pct.y) < 0.06).map(l => l.key);
+        });
+        // Check if any waypoint is inside a hazard polygon (simple point-in-polygon)
+        const isInHazard = (wp) => {
+          if (!wp.pct || !hazardPolys.length) return null;
+          for (const h of hazardPolys) {
+            let inside = false;
+            for (let i = 0, j = h.points.length - 1; i < h.points.length; j = i++) {
+              const xi = h.points[i].x, yi = h.points[i].y;
+              const xj = h.points[j].x, yj = h.points[j].y;
+              if (((yi > wp.pct.y) !== (yj > wp.pct.y)) && (wp.pct.x < (xj - xi) * (wp.pct.y - yi) / (yj - yi) + xi)) inside = !inside;
+            }
+            if (inside) return h.type;
+          }
+          return null;
+        };
+        return (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderLeft: `2px solid ${T.gold}`, padding: 10, marginTop: 8 }}>
           <SL c="ROUTE SEQUENCE" s={{ marginBottom: 10 }} />
-          {objWaypoints.map((w, i) => (
+          {objWaypoints.map((w, i) => {
+            const nearbyLocks = wpLockInfo[i] || [];
+            const hazard = isInHazard(w);
+            return (
             <div key={w.id} style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 8, paddingBottom: 8, borderBottom: `1px solid ${T.border}` }}>
               <div style={{ background: (w.isLoot ? w.players[0]?.color : T.gold) + "22", border: `1px solid ${w.isLoot ? w.players[0]?.color : T.gold}`, color: w.isLoot ? w.players[0]?.color : T.gold, width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", fontSize: T.fs4, fontWeight: "bold", flexShrink: 0, fontFamily: T.sans }}>{i + 1}</div>
               <div style={{ flex: 1 }}>
@@ -1575,9 +1616,12 @@ function MapOverlay({ apiMap, emap, route, conflicts, onConflictResolve }) {
                     <div style={{ fontSize: T.fs4, color: p.color, flex: 1 }}>{p.objective}{p.total > 1 && p.progress < p.total && <span style={{ color: T.textDim }}> ({p.progress}/{p.total})</span>}</div>
                   </div>
                 ))}
+                {hazard && <div style={{ fontSize: T.fs1, color: hazard === "minefield" ? T.error : T.orange, marginTop: 2 }}>⚠ {hazard === "minefield" ? "MINEFIELD" : "SNIPER ZONE"} — watch your step</div>}
+                {nearbyLocks.length > 0 && <div style={{ fontSize: T.fs1, color: "#d4b84a", marginTop: 2 }}>⚿ Nearby: {nearbyLocks.slice(0, 3).join(", ")}{nearbyLocks.length > 3 ? ` +${nearbyLocks.length - 3}` : ""}</div>}
               </div>
             </div>
-          ))}
+            );
+          })}
           {/* Extract as final step */}
           {extractWaypoints.map((w) => (
             <div key={w.id} style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
@@ -1600,7 +1644,8 @@ function MapOverlay({ apiMap, emap, route, conflicts, onConflictResolve }) {
             </a>
           )}
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
@@ -2679,7 +2724,7 @@ function SquadTab({ myProfile, saveMyProfile, apiMaps, apiTasks, apiTraders, loa
 
   const selectedMap = apiMaps?.find(m => m.id === selectedMapId);
   const selectedMapNorm = apiMaps?.find(m => m.id === selectedMapId)?.normalizedName;
-  const emap = EMAPS.find(m => m.id === selectedMapNorm);
+  const emap = mergeExtractPositions(EMAPS.find(m => m.id === selectedMapNorm), selectedMap);
   const allProfiles = [myProfile, ...room.roomSquad, ...importedSquad.filter(ip => !room.roomSquad.some(rp => rp.name === ip.name))];
 
   // When map changes, reset extract choices
@@ -2858,6 +2903,45 @@ function SquadTab({ myProfile, saveMyProfile, apiMaps, apiTasks, apiTraders, loa
       <div style={{ flex: 1, overflowY: "auto", padding: "14px 5%" }}>
         <div style={{ maxWidth: 900, margin: "0 auto" }}>
           <MapOverlay apiMap={selectedMap} emap={emap} route={route} conflicts={conflicts} onConflictResolve={handleConflictResolve} />
+
+          {/* Keys for this raid */}
+          {routeMode === "tasks" && selectedMap?.locks?.length > 0 && route.some(w => w.pct && !w.isExtract) && (() => {
+            const bounds = MAP_BOUNDS[selectedMapNorm] || null;
+            if (!bounds) return null;
+            const routeWps = route.filter(w => w.pct && !w.isExtract);
+            // Find locks near route waypoints (within ~5% of map distance)
+            const nearbyKeys = [];
+            const seenKeys = new Set();
+            (selectedMap.locks || []).forEach(lock => {
+              if (!lock.key?.name || !lock.position) return;
+              const lockPct = worldToPct(lock.position, bounds);
+              if (!lockPct) return;
+              const nearest = routeWps.reduce((best, wp) => {
+                const d = Math.hypot(wp.pct.x - lockPct.x, wp.pct.y - lockPct.y);
+                return d < best ? d : best;
+              }, Infinity);
+              if (nearest < 0.08 && !seenKeys.has(lock.key.name)) {
+                seenKeys.add(lock.key.name);
+                nearbyKeys.push({ name: lock.key.name, distance: nearest, needsPower: lock.needsPower, type: lock.lockType });
+              }
+            });
+            nearbyKeys.sort((a, b) => a.distance - b.distance);
+            if (nearbyKeys.length === 0) return null;
+            return (
+              <div style={{ background: "#1a1a14", border: `1px solid #3a3a20`, borderLeft: `2px solid #d4b84a`, padding: 10, marginTop: 8 }}>
+                <div style={{ fontSize: T.fs3, color: "#d4b84a", letterSpacing: 1, marginBottom: 6 }}>⚿ KEYS NEAR YOUR ROUTE<Tip text="Locked rooms within reach of your route waypoints. Bring these keys if you have them for bonus loot." /></div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                  {nearbyKeys.slice(0, 12).map(k => (
+                    <span key={k.name} style={{ fontSize: T.fs1, color: k.needsPower ? T.orange : T.textBright, background: k.needsPower ? T.orangeBg : "#1e1e14", border: `1px solid ${k.needsPower ? T.orangeBorder : "#3a3a20"}`, padding: "3px 7px" }}>
+                      {k.name}{k.needsPower ? " ⚡" : ""}
+                    </span>
+                  ))}
+                  {nearbyKeys.length > 12 && <span style={{ fontSize: T.fs1, color: T.textDim, padding: "3px 7px" }}>+{nearbyKeys.length - 12} more</span>}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Targeted items reminder */}
           {routeMode === "loot" && lootSubMode === "hideout" && hideoutTarget && apiHideout && (() => {
             const station = apiHideout.find(s => s.id === hideoutTarget.stationId);
@@ -2891,6 +2975,38 @@ function SquadTab({ myProfile, saveMyProfile, apiMaps, apiTasks, apiTraders, loa
               </div>
             </div>
           )}
+          {/* Transit awareness — suggest next map */}
+          {selectedMap?.transits?.length > 0 && routeMode === "tasks" && (() => {
+            const playable = ["customs","factory","woods","interchange","shoreline","reserve","lighthouse","streets-of-tarkov","the-lab","ground-zero"];
+            const transits = (selectedMap.transits || []).filter(t => t.map?.normalizedName && playable.includes(t.map.normalizedName));
+            if (!transits.length) return null;
+            // Check which connected maps have incomplete tasks for the player
+            const transitSuggestions = transits.map(t => {
+              const connMapName = t.map.name || t.map.normalizedName;
+              const connMapId = apiMaps?.find(m => m.normalizedName === t.map.normalizedName)?.id;
+              const taskCount = connMapId ? (myProfile.tasks || []).filter(({ taskId }) => {
+                const apiTask = apiTasks?.find(x => x.id === taskId);
+                if (!apiTask || apiTask.map?.id !== connMapId) return false;
+                const reqObjs = (apiTask.objectives || []).filter(o => !o.optional);
+                const prog = myProfile.progress || {};
+                return reqObjs.some(obj => (prog[`${myProfile.id}-${taskId}-${obj.id}`] || 0) < getObjMeta(obj).total);
+              }).length : 0;
+              return { name: connMapName, norm: t.map.normalizedName, desc: t.description, taskCount };
+            }).sort((a, b) => b.taskCount - a.taskCount);
+            return (
+              <div style={{ background: T.purpleBg, border: `1px solid ${T.purpleBorder}`, borderLeft: `2px solid ${T.purple}`, padding: 10, marginTop: 10 }}>
+                <div style={{ fontSize: T.fs3, color: T.purple, letterSpacing: 1, marginBottom: 6 }}>TRANSIT — AFTER THIS RAID<Tip text="Maps connected via the transit system. Extract via a transit point to chain raids without returning to the main menu." /></div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                  {transitSuggestions.map(t => (
+                    <div key={t.norm} style={{ background: t.taskCount > 0 ? T.purple + "15" : "transparent", border: `1px solid ${t.taskCount > 0 ? T.purple : T.border}`, padding: "5px 10px", fontSize: T.fs2, color: t.taskCount > 0 ? T.purple : T.textDim }}>
+                      {t.name}{t.taskCount > 0 && <span style={{ color: T.gold, marginLeft: 6, fontSize: T.fs1 }}>★ {t.taskCount} task{t.taskCount > 1 ? "s" : ""}</span>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Extract selection — post-route (when no extract was pre-selected) */}
           {!route.some(w => w.isExtract) && emap && (
             <div style={{ background: T.surface, border: `1px solid ${T.successBorder}`, borderLeft: `2px solid ${T.success}`, padding: 12, marginTop: 10 }}>
@@ -2956,7 +3072,17 @@ function SquadTab({ myProfile, saveMyProfile, apiMaps, apiTasks, apiTraders, loa
     if (room.status === "connected") room.roomSquad.forEach(p => qIds.add(p.id));
     setActiveIds(qIds);
     setPriorityTasks(computeQuickTasks(allProfiles, quickTopMap.mapId, filteredApiTasks, tasksPerPerson));
-    setExtractChoices({});
+    // Auto-select first open PMC extract for each player
+    const quickMapNorm = apiMaps?.find(m => m.id === quickTopMap.mapId)?.normalizedName;
+    const quickEmap = EMAPS.find(m => m.id === quickMapNorm);
+    const openExtract = quickEmap?.pmcExtracts?.find(e => e.type === "open" && e.pct);
+    if (openExtract) {
+      const autoEC = {};
+      qIds.forEach(pid => { autoEC[pid] = { extract: openExtract, missingItems: [] }; });
+      setExtractChoices(autoEC);
+    } else {
+      setExtractChoices({});
+    }
     setQuickGenPending(true);
   };
 
@@ -4027,17 +4153,68 @@ export default function TarkovGuide() {
   const [pendingRouteTask, setPendingRouteTask] = useState(null);
   const [welcomed, saveWelcomed] = useStorage("tg-welcomed-v6", false);
   const [showWelcome, setShowWelcome] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQ, setSearchQ] = useState("");
   useEffect(() => { if (profileReady && !welcomed) setShowWelcome(true); }, [profileReady, welcomed]);
 
   return (
     <div style={{ height: "100vh", width: "100%", display: "flex", justifyContent: "center", background: "#000" }}>
     <div style={{ height: "100%", width: "100%", maxWidth: 960, background: T.bg, color: T.text, fontFamily: T.sans, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative" }}>
       {showWelcome && <WelcomeBanner onDismiss={() => { setShowWelcome(false); saveWelcomed(true); }} />}
+      {searchOpen && (() => {
+        const q = searchQ.toLowerCase().trim();
+        const results = [];
+        if (q.length >= 2) {
+          // Search tasks
+          (apiTasks || []).filter(t => t.name.toLowerCase().includes(q)).slice(0, 8).forEach(t => {
+            results.push({ type: "Task", name: t.name, detail: `${t.trader?.name || ""}${t.map ? " · " + t.map.name : ""}`, action: () => { setTab("profile"); setSearchOpen(false); } });
+          });
+          // Search maps
+          EMAPS.filter(m => m.name.toLowerCase().includes(q)).forEach(m => {
+            results.push({ type: "Map", name: m.name, detail: m.tier, action: () => { setTab("extracts"); setSearchOpen(false); } });
+          });
+          // Search extracts
+          EMAPS.forEach(m => {
+            [...(m.pmcExtracts || []), ...(m.scavExtracts || [])].filter(e => e.name.toLowerCase().includes(q)).slice(0, 4).forEach(e => {
+              results.push({ type: "Extract", name: e.name, detail: `${m.name} · ${e.type}`, action: () => { setTab("extracts"); setSearchOpen(false); } });
+            });
+          });
+          // Search bosses
+          (apiMaps || []).forEach(m => {
+            (m.bosses || []).filter(b => b.boss?.name?.toLowerCase().includes(q)).forEach(b => {
+              results.push({ type: "Boss", name: b.boss.name, detail: `${m.name} · ${Math.round((b.spawnChance || 0) * 100)}%`, action: () => { setSearchOpen(false); } });
+            });
+          });
+        }
+        return (
+          <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.9)", zIndex: 100, display: "flex", flexDirection: "column", padding: 14 }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+              <input value={searchQ} onChange={e => setSearchQ(e.target.value)} autoFocus placeholder="Search tasks, maps, extracts, bosses..."
+                style={{ flex: 1, background: T.surface, border: `1px solid ${T.borderBright}`, color: T.textBright, padding: "10px 12px", fontSize: T.fs3, fontFamily: T.sans, outline: "none" }} />
+              <button onClick={() => setSearchOpen(false)} style={{ background: "transparent", border: `1px solid ${T.border}`, color: T.textDim, padding: "10px 14px", fontSize: T.fs3, cursor: "pointer", fontFamily: T.sans }}>ESC</button>
+            </div>
+            <div style={{ flex: 1, overflowY: "auto" }}>
+              {q.length < 2 && <div style={{ color: T.textDim, fontSize: T.fs3, textAlign: "center", padding: 20 }}>Type at least 2 characters to search</div>}
+              {q.length >= 2 && results.length === 0 && <div style={{ color: T.textDim, fontSize: T.fs3, textAlign: "center", padding: 20 }}>No results for "{searchQ}"</div>}
+              {results.map((r, i) => (
+                <button key={i} onClick={r.action} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", background: T.surface, border: `1px solid ${T.border}`, borderLeft: `2px solid ${r.type === "Task" ? T.gold : r.type === "Map" ? T.blue : r.type === "Boss" ? T.error : T.success}`, padding: "10px 12px", marginBottom: 4, cursor: "pointer", textAlign: "left" }}>
+                  <div>
+                    <div style={{ color: T.textBright, fontSize: T.fs3, fontWeight: "bold" }}>{r.name}</div>
+                    <div style={{ color: T.textDim, fontSize: T.fs1, marginTop: 2 }}>{r.detail}</div>
+                  </div>
+                  <span style={{ fontSize: T.fs1, color: T.textDim, fontFamily: T.sans, letterSpacing: 1 }}>{r.type.toUpperCase()}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
       <div style={{ background: T.surface, borderBottom: `1px solid ${T.borderBright}`, padding: "10px 14px 8px", flexShrink: 0 }}>
         <div style={{ fontSize: T.fs2, letterSpacing: 1.5, color: T.textDim, marginBottom: 2 }}>PvE FIELD REFERENCE</div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div style={{ fontSize: T.fs5, fontWeight: "bold", color: T.gold, letterSpacing: 1.5 }}>TARKOV GUIDE</div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button onClick={() => { setSearchOpen(true); setSearchQ(""); }} style={{ background: "transparent", border: `1px solid ${T.border}`, color: T.textDim, padding: "3px 8px", fontSize: T.fs2, cursor: "pointer", fontFamily: T.sans }}>🔍</button>
             {myProfile.name && <div style={{ fontSize: T.fs3, color: myProfile.color, fontFamily: T.sans }}>{myProfile.name}</div>}
             <div style={{ fontSize: T.fs1, color: apiError ? T.errorBorder : T.successBorder, display: "flex", alignItems: "center", gap: 4 }}>
               <div style={{ width: 5, height: 5, borderRadius: "50%", background: apiError ? T.error : T.success }} />
