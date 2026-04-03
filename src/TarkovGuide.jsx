@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "./supabase.js";
 
 const T = {
-  bg:"#141414",surface:"#1e1e1e",surfaceAlt:"#252525",border:"#333",borderBright:"#444",gold:"#d4a644",text:"#c0b8a8",textDim:"#6a6a6a",textBright:"#e8e0d0",
+  bg:"#141414",surface:"#1e1e1e",surfaceAlt:"#252525",surfaceHover:"#282828",border:"#333",borderBright:"#444",gold:"#d4a644",text:"#c0b8a8",textDim:"#6a6a6a",textMid:"#8a8a8a",textBright:"#e8e0d0",
   sans:"'Segoe UI',Arial,Helvetica,sans-serif",mono:"'Courier New',Consolas,monospace",
   // Semantic colors
   error:"#d44040",errorBg:"#1f1414",errorBorder:"#4a2020",
@@ -13,12 +13,16 @@ const T = {
   purple:"#9080b0",purpleBg:"#1a141f",purpleBorder:"#3a2a5a",
   // Spacing scale
   sp1:4, sp2:8, sp3:12, sp4:16, sp5:24,
-  // Font sizes
-  fs1:12, fs2:13, fs3:14, fs4:18, fs5:22,
+  // Font sizes (1.25 ratio scale)
+  fs1:11, fs2:13, fs3:15, fs4:17, fs5:20, fs6:26,
+  // Touch target minimum
+  touch:44,
   // Accent border
   accent:2,
+  // Border radius
+  r1:4, r2:6,
   // Input base style
-  input:{ background:"#181818", border:"1px solid #383838", color:"#e0d8c8", padding:"8px 12px", fontSize:13, fontFamily:"'Segoe UI',Arial,Helvetica,sans-serif", outline:"none", boxSizing:"border-box" },
+  input:{ background:"#181818", border:"1px solid #383838", color:"#e0d8c8", padding:"10px 12px", fontSize:13, fontFamily:"'Segoe UI',Arial,Helvetica,sans-serif", outline:"none", boxSizing:"border-box", borderRadius:4 },
 };
 const PLAYER_COLORS = ["#c8a84b","#5a9aba","#9a5aba","#5aba8a","#ba7a5a"];
 const MAX_SQUAD = 5;
@@ -703,10 +707,9 @@ function computeItemRecommendation(neededItems, apiMaps) {
 }
 
 // ─── SHARED UI ────────────────────────────────────────────────────────────
-const SL=({c,s={}})=><div style={{fontSize:T.fs2,color:T.textDim,letterSpacing:1.5,marginBottom:T.sp2,fontFamily:T.sans,textTransform:"uppercase",fontWeight:600,...s}}>{c}</div>;
-const Badge=({label,color,small})=><span style={{background:color+"22",color,border:`1px solid ${color}44`,padding:small?`2px 6px`:`${T.sp1}px ${T.sp2}px`,fontSize:small?T.fs1:T.fs2,letterSpacing:0.5,fontFamily:T.sans,whiteSpace:"nowrap"}}>{label}</span>;
-// Button sizes: small (fs1/sp1), medium (fs2/sp2), large (fs3/sp3)
-const Btn=({ch,onClick,active,color=T.gold,small,style={},disabled})=><button onClick={disabled?undefined:onClick} style={{background:active?color+"22":"transparent",color:disabled?T.textDim:(active?color:T.textDim),border:active?`2px solid ${color}`:`1px solid ${T.border}`,padding:small?`${T.sp1}px ${T.sp2}px`:`${T.sp2}px ${T.sp4}px`,fontSize:small?T.fs2:T.fs3,letterSpacing:1,cursor:disabled?"default":"pointer",fontFamily:T.sans,textTransform:"uppercase",whiteSpace:"nowrap",fontWeight:active?"bold":"normal",transition:"background 0.15s, border-color 0.15s",...style}}>{ch}</button>;
+const SL=({c,s={}})=><div style={{fontSize:T.fs5,color:T.textMid,letterSpacing:1.5,marginBottom:T.sp3,fontFamily:T.sans,textTransform:"uppercase",fontWeight:600,...s}}>{c}</div>;
+const Badge=({label,color,small})=><span style={{background:color+"22",color,border:`1px solid ${color}44`,padding:small?`3px 8px`:`${T.sp1}px ${T.sp3}px`,fontSize:small?T.fs1:T.fs2,letterSpacing:0.5,fontFamily:T.sans,whiteSpace:"nowrap",borderRadius:T.r1}}>{label}</span>;
+const Btn=({ch,onClick,active,color=T.gold,compact,style={},disabled})=><button onClick={disabled?undefined:onClick} style={{background:active?color+"22":"transparent",color:disabled?T.textDim:(active?color:T.textDim),border:active?`2px solid ${color}`:`1px solid ${T.border}`,padding:compact?`8px ${T.sp3}px`:`${T.sp3}px ${T.sp4}px`,fontSize:compact?T.fs2:T.fs3,letterSpacing:1,cursor:disabled?"default":"pointer",fontFamily:T.sans,textTransform:"uppercase",whiteSpace:"nowrap",fontWeight:active?"bold":"normal",transition:"all 0.15s ease",borderRadius:T.r2,minHeight:T.touch,...style}}>{ch}</button>;
 
 function Tip({ text, step }) {
   const [open, setOpen] = useState(false);
@@ -715,7 +718,7 @@ function Tip({ text, step }) {
       <button
         onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
         style={{
-          width: 16, height: 16, borderRadius: "50%",
+          width: 24, height: 24, borderRadius: "50%",
           background: open ? T.surfaceAlt : "transparent",
           border: `1px solid ${open ? T.gold : T.border}`,
           color: open ? T.gold : T.textDim,
@@ -1836,8 +1839,8 @@ function MyProfileTab({ myProfile, saveMyProfile, apiTasks, apiTraders, loading,
             })}
           </div>
           <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-            <Btn ch="All Maps" small active={taskMapFilter === "all"} onClick={() => setTaskMapFilter("all")} />
-            {taskMaps.map(m => <Btn key={m} ch={m.split(" ")[0]} small active={taskMapFilter === m} onClick={() => setTaskMapFilter(m)} />)}
+            <Btn ch="All Maps" compact active={taskMapFilter === "all"} onClick={() => setTaskMapFilter("all")} />
+            {taskMaps.map(m => <Btn key={m} ch={m.split(" ")[0]} compact active={taskMapFilter === m} onClick={() => setTaskMapFilter(m)} />)}
           </div>
         </div>
         <div style={{ flex: 1, overflowY: "auto", padding: 14 }}>
@@ -1893,6 +1896,11 @@ function MyProfileTab({ myProfile, saveMyProfile, apiTasks, apiTraders, loading,
             );
           });
           })()}
+          {!loading && browseTasks.length === 0 && (
+            <div style={{ textAlign: "center", padding: 20, color: T.textDim, fontSize: T.fs3 }}>
+              No tasks match your filters. Try a different trader or clear your search.
+            </div>
+          )}
           <div style={{ height: 20 }} />
         </div>
       </div>
@@ -1941,6 +1949,21 @@ function MyProfileTab({ myProfile, saveMyProfile, apiTasks, apiTraders, loading,
         {/* ── PROFILE SUB-TAB ── */}
         {profileSub === "profile" && (
           <>
+            {/* Get started card for new users */}
+            {(!myProfile.name || !(myProfile.tasks || []).length) && (
+              <div style={{ background: T.gold + "11", border: `2px solid ${T.gold}44`, borderRadius: T.r1, padding: T.sp4, marginBottom: T.sp4 }}>
+                <div style={{ fontSize: T.fs5, color: T.gold, fontWeight: "bold", letterSpacing: 1, marginBottom: T.sp2 }}>GET STARTED</div>
+                <div style={{ fontSize: T.fs3, color: T.text, lineHeight: 1.8, marginBottom: T.sp3 }}>
+                  {!myProfile.name && <div style={{ color: T.gold }}>1. Set your name above</div>}
+                  {myProfile.name && <div style={{ color: T.success }}>1. Name set ✓</div>}
+                  {!(myProfile.tasks || []).length ? <div style={{ color: T.gold }}>2. Go to Tasks tab and add your active quests</div> : <div style={{ color: T.success }}>2. Tasks added ✓</div>}
+                  <div style={{ color: T.textDim }}>3. Copy your share code and head to Squad tab</div>
+                </div>
+                {myProfile.name && !(myProfile.tasks || []).length && (
+                  <button onClick={() => setScreen("browsetasks")} style={{ width: "100%", background: T.gold, color: T.bg, border: "none", padding: "12px 0", fontSize: T.fs3, fontWeight: "bold", letterSpacing: 1, cursor: "pointer", fontFamily: T.sans, borderRadius: T.r2 }}>+ BROWSE TASKS</button>
+                )}
+              </div>
+            )}
             <SL c={<>YOUR SHARE CODE<Tip text="Copy this code and paste it in Discord before each raid. Your squadmates paste it in their Squad tab to import your profile and tasks." /></>} />
             <div style={{ background: T.surface, border: `1px solid ${myProfile.color}44`, borderLeft: `2px solid ${myProfile.color}`, padding: 12, marginBottom: 16 }}>
               <div style={{ fontSize: T.fs2, color: T.text, lineHeight: 1.7, marginBottom: 10 }}>Copy your code and paste it in Discord before each raid. Teammates import it in the Squad tab — no account needed.</div>
@@ -3121,7 +3144,7 @@ function SquadTab({ myProfile, saveMyProfile, apiMaps, apiTasks, apiTraders, loa
         {quickTopMap && quickTaskCount > 0 ? (
           <div style={{ background: T.surface, border: `2px solid ${T.gold}44`, borderLeft: `2px solid ${T.gold}`, padding: 14, marginBottom: 14 }}>
             <div style={{ fontSize: T.fs2, color: T.textDim, letterSpacing: 1, marginBottom: 8 }}>★ RECOMMENDED MAP{targetTrader ? ` FOR ${targetTrader.toUpperCase()}` : ""}</div>
-            <div style={{ fontSize: T.fs5, color: T.gold, fontWeight: "bold", fontFamily: T.sans, letterSpacing: 1, marginBottom: 4 }}>{quickTopMap.mapName}</div>
+            <div style={{ fontSize: T.fs6, color: T.gold, fontWeight: "bold", fontFamily: T.sans, letterSpacing: 1, marginBottom: 4 }}>{quickTopMap.mapName}</div>
             <div style={{ fontSize: T.fs2, color: T.textDim, marginBottom: 10 }}>{quickTopMap.totalTasks} task{quickTopMap.totalTasks !== 1 ? "s" : ""} · {quickTopMap.totalIncomplete} objective{quickTopMap.totalIncomplete !== 1 ? "s" : ""} remaining</div>
 
             <div style={{ display: "flex", gap: 4, marginBottom: 12 }}>
@@ -4012,7 +4035,7 @@ function ExtractsTab() {
           <div style={{ marginBottom: 10 }}>
             <SL c="FILTER" s={{ marginBottom: 6 }} />
             <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-              <Btn ch={`All (${exts.length})`} small active={fil === "all"} onClick={() => setFil("all")} />
+              <Btn ch={`All (${exts.length})`} compact active={fil === "all"} onClick={() => setFil("all")} />
               {types.map(t => { const c = ET_CONFIG[t]; return <button key={t} onClick={() => setFil(t)} style={{ background: fil === t ? c.bg : "transparent", color: fil === t ? c.color : T.textDim, border: `1px solid ${fil === t ? c.border : T.border}`, padding: "4px 8px", fontSize: T.fs2, cursor: "pointer", fontFamily: T.sans }}>{c.icon} {exts.filter(e => e.type === t).length}</button>; })}
             </div>
           </div>
@@ -4106,7 +4129,7 @@ function WelcomeBanner({ onDismiss }) {
         <div style={{ fontSize: T.fs3, color: T.textBright, fontWeight: "bold", marginBottom: 10 }}>Tarkov PvE Squad Guide</div>
         <div style={{ fontSize: T.fs2, color: T.text, lineHeight: 1.8, marginBottom: 14 }}>Each player manages their own profile. Share a code before raids — no squad secretary needed.</div>
         {["✓ Set your name + tasks in My Profile", "✓ Copy your code → paste it in Discord", "✓ Squad tab: paste teammates' codes, select map", "✓ Pick your intended extract — item checks included", "✓ Generate route: objectives optimized, extract last", "✓ Post-raid updates only your own progress", "✓ Install as home screen app — see Maps tab"].map((t, i) => <div key={i} style={{ fontSize: T.fs2, color: T.success, marginBottom: 4 }}>{t}</div>)}
-        <button onClick={onDismiss} style={{ width: "100%", background: T.gold, color: T.bg, border: "none", padding: "11px 0", fontSize: T.fs4, letterSpacing: 1.5, cursor: "pointer", fontFamily: T.sans, textTransform: "uppercase", fontWeight: "bold", marginTop: 14 }}>ENTER FIELD GUIDE</button>
+        <button onClick={onDismiss} style={{ width: "100%", background: T.gold, color: T.bg, border: "none", padding: "14px 0", fontSize: T.fs4, letterSpacing: 1.5, cursor: "pointer", fontFamily: T.sans, textTransform: "uppercase", fontWeight: "bold", marginTop: 14, borderRadius: T.r2 }}>ENTER FIELD GUIDE</button>
       </div>
     </div>
   );
@@ -4212,7 +4235,7 @@ export default function TarkovGuide() {
       <div style={{ background: T.surface, borderBottom: `1px solid ${T.borderBright}`, padding: "10px 14px 8px", flexShrink: 0 }}>
         <div style={{ fontSize: T.fs2, letterSpacing: 1.5, color: T.textDim, marginBottom: 2 }}>PvE FIELD REFERENCE</div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div style={{ fontSize: T.fs5, fontWeight: "bold", color: T.gold, letterSpacing: 1.5 }}>TARKOV GUIDE</div>
+          <div style={{ fontSize: T.fs6, fontWeight: "bold", color: T.gold, letterSpacing: 1.5 }}>TARKOV GUIDE</div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <button onClick={() => { setSearchOpen(true); setSearchQ(""); }} style={{ background: "transparent", border: `1px solid ${T.border}`, color: T.textDim, padding: "3px 8px", fontSize: T.fs2, cursor: "pointer", fontFamily: T.sans }}>🔍</button>
             {myProfile.name && <div style={{ fontSize: T.fs3, color: myProfile.color, fontFamily: T.sans }}>{myProfile.name}</div>}
