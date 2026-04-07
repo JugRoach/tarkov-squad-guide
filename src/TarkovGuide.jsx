@@ -1408,8 +1408,11 @@ function MapOverlay({ apiMap, emap, route, conflicts, onConflictResolve }) {
   const objWaypoints = route.filter(w => w.pct && !w.isExtract);
   const extractWaypoints = route.filter(w => w.pct && w.isExtract);
 
-  // Convert pct {x,y} (0-1, y-down) to Leaflet LatLng (y-up)
-  const toLL = (pct) => [1 - pct.y, pct.x];
+  // Map scale: use 1000x1000 coordinate space so Leaflet zoom levels work naturally
+  const MAP_SCALE = 1000;
+  // Convert pct {x,y} (0-1, y-down) to Leaflet LatLng (y-up, scaled)
+  const toLL = (pct) => [(1 - pct.y) * MAP_SCALE, pct.x * MAP_SCALE];
+  const mapBounds = [[0, 0], [MAP_SCALE, MAP_SCALE]];
 
   // Pre-compute layer data positions
   const bossMarkers = (apiMap?.bosses || []).map(b => {
@@ -1447,15 +1450,17 @@ function MapOverlay({ apiMap, emap, route, conflicts, onConflictResolve }) {
     if (!mapContainerRef.current || leafletMapRef.current) return;
     const map = L.map(mapContainerRef.current, {
       crs: L.CRS.Simple,
-      minZoom: -1,
-      maxZoom: 5,
+      minZoom: -2,
+      maxZoom: 4,
       zoomSnap: 0.25,
       zoomDelta: 0.5,
       attributionControl: false,
       zoomControl: false,
+      maxBounds: [[-100, -100], [1100, 1100]],
+      maxBoundsViscosity: 0.8,
     });
     L.control.zoom({ position: "topright" }).addTo(map);
-    map.fitBounds([[0, 0], [1, 1]]);
+    map.fitBounds([[0, 0], [1000, 1000]]);
     leafletMapRef.current = map;
     // Create layer groups
     ["route", "hazards", "stashes", "locks", "btr"].forEach(id => {
@@ -1472,9 +1477,9 @@ function MapOverlay({ apiMap, emap, route, conflicts, onConflictResolve }) {
     if (!map) return;
     if (imageOverlayRef.current) { map.removeLayer(imageOverlayRef.current); imageOverlayRef.current = null; }
     if (svgUrl) {
-      const overlay = L.imageOverlay(svgUrl, [[0, 0], [1, 1]]).addTo(map);
+      const overlay = L.imageOverlay(svgUrl, [[0, 0], [1000, 1000]]).addTo(map);
       imageOverlayRef.current = overlay;
-      map.fitBounds([[0, 0], [1, 1]]);
+      map.fitBounds([[0, 0], [1000, 1000]]);
     }
   }, [svgUrl]);
 
