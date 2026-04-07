@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192">
+  <rect width="192" height="192" rx="28.799999999999997" fill="#0d0e10"/>
+  <rect x="15.36" y="15.36" width="161.28" height="161.28" rx="19.200000000000003" fill="none" stroke="#d2af78" stroke-width="5.76"/>
+  <text x="96" y="119.03999999999999" text-anchor="middle" font-family="sans-serif" font-weight="bold" font-size="67.19999999999999" fill="#d2af78">TG</text>
+  <text x="96" y="157.44" text-anchor="middle" font-family="sans-serif" font-size="23.04" fill="#8a8070">PvE</text>
+</svg>
