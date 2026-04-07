@@ -78,6 +78,43 @@ export default function ProfileTab({ myProfile, saveMyProfile, setTab }) {
           )}
         </div>
 
+        {/* ── TARKOVTRACKER SYNC GUIDE ── */}
+        <SL c={<>SYNC YOUR QUESTS<Tip text="Automatically import your in-game quest progress instead of adding tasks manually. Uses TarkovTracker — a free community tool used by thousands of Tarkov players." /></>} />
+        <div style={{ background: T.surface, border: `1px solid ${T.cyanBorder}`, borderLeft: `2px solid ${T.cyan}`, padding: 12, marginBottom: 10 }}>
+          <div style={{ fontSize: T.fs3, color: T.cyan, fontWeight: "bold", marginBottom: 6 }}>Auto-import your quest progress</div>
+          <div style={{ fontSize: T.fs2, color: T.text, lineHeight: 1.8, marginBottom: 12 }}>
+            Instead of manually adding each task, you can sync your actual in-game quest progress using <a href="https://tarkovtracker.io" target="_blank" rel="noreferrer" style={{ color: T.cyan, textDecoration: "none", fontWeight: "bold" }}>TarkovTracker.io</a> — a free community tracker used by thousands of Tarkov players.
+          </div>
+          <div style={{ fontSize: T.fs2, color: T.cyan, letterSpacing: 1, marginBottom: 8 }}>HOW TO SET IT UP</div>
+          {[
+            { step: "Create a TarkovTracker account", detail: "Go to tarkovtracker.io and sign up for free. You can log in with Discord, Google, or email.", link: "https://tarkovtracker.io" },
+            { step: "Mark your completed quests", detail: "On TarkovTracker, check off quests you've already finished. This tells the sync which tasks are done vs in-progress. You only need to do this once — after that, TarkovMonitor can update it automatically." },
+            { step: "Generate an API token", detail: "Go to Settings on TarkovTracker. Click 'Create Token' and make sure 'Read Progression' is enabled. Copy the token it gives you.", link: "https://tarkovtracker.io/settings" },
+            { step: "Paste the token in this app", detail: "Go to the Tasks tab in this app. At the top you'll see 'SYNC FROM TARKOVTRACKER' — expand it, paste your token, and hit Sync. Your quests and progress will be imported instantly." },
+          ].map((s, i) => (
+            <div key={i} style={{ display: "flex", gap: 10, marginBottom: 10, alignItems: "flex-start" }}>
+              <div style={{ background: T.cyan + "22", color: T.cyan, width: 24, height: 24, display: "flex", alignItems: "center", justifyContent: "center", fontSize: T.fs3, flexShrink: 0, fontFamily: T.mono, fontWeight: "bold" }}>{i + 1}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: T.fs2, color: T.textBright, fontWeight: "bold", marginBottom: 2 }}>{s.step}</div>
+                <div style={{ fontSize: T.fs1, color: T.textDim, lineHeight: 1.6 }}>{s.detail}</div>
+                {s.link && <a href={s.link} target="_blank" rel="noreferrer" style={{ fontSize: T.fs1, color: T.cyan, textDecoration: "none" }}>{s.link.replace("https://", "")} →</a>}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderLeft: `2px solid ${T.orange}`, padding: 12, marginBottom: 10 }}>
+          <div style={{ fontSize: T.fs2, color: T.orange, fontWeight: "bold", marginBottom: 4 }}>Optional: Auto-update with TarkovMonitor</div>
+          <div style={{ fontSize: T.fs1, color: T.textDim, lineHeight: 1.6, marginBottom: 6 }}>
+            <a href="https://github.com/the-hideout/TarkovMonitor" target="_blank" rel="noreferrer" style={{ color: T.orange, textDecoration: "none" }}>TarkovMonitor</a> is a free desktop app that runs alongside Tarkov and reads your game logs. When you complete a quest in-game, it automatically updates your TarkovTracker profile — so next time you sync here, your progress is already up to date.
+          </div>
+          <div style={{ fontSize: T.fs1, color: T.textDim, lineHeight: 1.6 }}>
+            Download it from GitHub, connect it to your TarkovTracker account, and forget about it. It runs silently in the background while you play.
+          </div>
+        </div>
+        <div style={{ background: T.successBg, border: `1px solid ${T.successBorder}`, padding: 10, marginBottom: 16 }}>
+          <div style={{ fontSize: T.fs2, color: T.success, lineHeight: 1.7 }}>✓ Free to use · ✓ No game mods needed · ✓ Safe — only reads log files · ✓ Works with Live &amp; PvE Tarkov</div>
+        </div>
+
         {/* ── INSTALL APP ── */}
         <SL c={<>INSTALL AS APP<Tip text="Add this to your home screen for a native app experience. Runs full-screen, appears in your app launcher — no app store required." /></>} />
         <div style={{ background: T.surface, border: `1px solid ${T.blueBorder}`, borderLeft: `2px solid ${T.blue}`, padding: 12, marginBottom: 16 }}>
