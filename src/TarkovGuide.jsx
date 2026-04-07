@@ -534,7 +534,7 @@ function mergeExtractPositions(emapEntry, apiMap) {
 
 // ─── ROUTE UTILS ─────────────────────────────────────────────────────────
 function worldToPct(pos,bounds){if(!pos||!bounds)return null;const{left,right,top,bottom}=bounds;const gx=bounds.swap?pos.z:pos.x;const gz=bounds.swap?pos.x:pos.z;const x=(gx-left)/(right-left);const y=(gz-top)/(bottom-top);if(isNaN(x)||isNaN(y))return null;if(x<-0.05||x>1.05||y<-0.05||y>1.05)return null;return{x:Math.max(0.02,Math.min(0.98,x)),y:Math.max(0.02,Math.min(0.98,y))};}
-function nearestNeighbor(waypoints){if(!waypoints.length)return[];const origin={pct:{x:0.5,y:0.5}};const remaining=[...waypoints];const route=[];let cur=origin;while(remaining.length){const hasPos=remaining.some(w=>w.pct);if(!hasPos){route.push(...remaining);break;}let best=0,bestD=Infinity;remaining.forEach((w,i)=>{if(!w.pct)return;const d=Math.hypot(w.pct.x-cur.pct.x,w.pct.y-cur.pct.y);if(d<bestD){bestD=d;best=i;}});const next=remaining.splice(best,1)[0];route.push(next);if(next.pct)cur={pct:next.pct};}return route;}
+function nearestNeighbor(waypoints){if(!waypoints.length)return[];const remaining=[...waypoints];const route=[];const first=remaining.reduce((best,w,i)=>w.pct?(!best.w||i===0?{w,i}:best):best,{w:null,i:0});const start=remaining.splice(first.i,1)[0];route.push(start);let cur=start.pct?{pct:start.pct}:{pct:{x:0,y:0}};while(remaining.length){const hasPos=remaining.some(w=>w.pct);if(!hasPos){route.push(...remaining);break;}let best=0,bestD=Infinity;remaining.forEach((w,i)=>{if(!w.pct)return;const d=Math.hypot(w.pct.x-cur.pct.x,w.pct.y-cur.pct.y);if(d<bestD){bestD=d;best=i;}});const next=remaining.splice(best,1)[0];route.push(next);if(next.pct)cur={pct:next.pct};}return route;}
 function getObjMeta(obj){const t=obj.type;
   if(t==="shoot")return{icon:"☠",color:"#e05a5a",summary:`Kill ${obj.count>1?obj.count+"× ":""}${obj.targetNames?.[0]||"enemy"}${obj.zoneNames?.length?" ("+obj.zoneNames[0]+")":""}`,isCountable:true,total:obj.count||1};
   if(t==="findItem"||t==="giveItem"||t==="sellItem")return{icon:"◈",color:"#d4b84a",summary:`${obj.count>1?obj.count+"× ":""}${obj.items?.[0]?.name||"item"}${obj.foundInRaid?" (FIR)":""}`,isCountable:obj.count>1,total:obj.count||1};
@@ -1496,15 +1496,6 @@ function MapOverlay({ apiMap, emap, route, conflicts, onConflictResolve }) {
     // ── Route layer ──
     const routeGroup = groups.route;
     if (routeGroup) {
-      // Spawn marker
-      routeGroup.addLayer(L.marker(toLL({ x: 0.5, y: 0.5 }), {
-        icon: mkIcon(`<div style="width:28px;height:28px;border-radius:50%;background:${T.successBg};border:3px solid ${T.success};display:flex;align-items:center;justify-content:center;color:${T.success};font:bold 14px ${T.mono}">S</div>`, 28),
-        interactive: false,
-      }));
-      // Spawn to first objective
-      if (objWaypoints[0]) {
-        routeGroup.addLayer(L.polyline([toLL({ x: 0.5, y: 0.5 }), toLL(objWaypoints[0].pct)], { color: T.success, weight: 3, dashArray: "10,6", opacity: 0.7 }));
-      }
       // Route polyline
       if (objWaypoints.length > 1) {
         routeGroup.addLayer(L.polyline(objWaypoints.map(w => toLL(w.pct)), { color: T.gold, weight: 4, dashArray: "12,6", opacity: 0.85 }));
