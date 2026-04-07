@@ -1,9 +1,10 @@
 import { useState, useRef, useMemo, useCallback } from "react";
 import { T } from '../theme.js';
 import { SL, Badge, Btn, Tip } from '../components/ui/index.js';
-import { getObjMeta, getAllPrereqTaskIds } from '../lib/utils.js';
+import { getObjMeta, progressKey, getAllPrereqTaskIds } from '../lib/utils.js';
 import { markTaskCompleteInProgress, cleanOrphanedPrereqProgress, computeTaskDepths } from '../lib/taskUtils.js';
 import { traderSort } from '../constants.js';
+import { useStorage } from '../hooks/useStorage.js';
 
 export default function TasksTab({ myProfile, saveMyProfile, apiTasks, apiTraders, loading, apiError, apiHideout, hideoutLevels, saveHideoutLevels, hideoutTarget, saveHideoutTarget, onRouteTask }) {
   const [profileSub, setProfileSub] = useState("tasks"); // "tasks" | "browse" | "hideout" | "chains"
@@ -18,6 +19,92 @@ export default function TasksTab({ myProfile, saveMyProfile, apiTasks, apiTrader
   const [taskGroupBy, setTaskGroupBy] = useState("trader"); // "az", "trader", "map"
   const [hideoutPrereq, setHideoutPrereq] = useState(null);
   const [expandedStation, setExpandedStation] = useState(null);
+
+  // TarkovTracker sync
+  const [ttToken, saveTtToken] = useStorage("tg-tarkovtracker-token-v1", "");
+  const [ttTokenInput, setTtTokenInput] = useState("");
+  const [ttSyncStatus, setTtSyncStatus] = useState("idle"); // idle | syncing | done | error
+  const [ttSyncMsg, setTtSyncMsg] = useState("");
+  const [ttExpanded, setTtExpanded] = useState(false);
+
+  const syncFromTarkovTracker = useCallback(async () => {
+    const token = ttToken || ttTokenInput.trim();
+    if (!token) { setTtSyncMsg("Enter your TarkovTracker API token first."); setTtSyncStatus("error"); return; }
+    setTtSyncStatus("syncing"); setTtSyncMsg("");
+    try {
+      const res = await fetch("https://tarkovtracker.io/api/v2/progress", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error(res.status === 401 ? "Invalid token — check your TarkovTracker API key." : `TarkovTracker returned ${res.status}`);
+      const { data } = await res.json();
+      if (!data?.tasksProgress) throw new Error("Unexpected response format.");
+
+      // Save token on success if not already saved
+      if (!ttToken && ttTokenInput.trim()) saveTtToken(ttTokenInput.trim());
+
+      const completedIds = new Set(data.tasksProgress.filter(t => t.complete && !t.invalid).map(t => t.id));
+      const failedIds = new Set(data.tasksProgress.filter(t => t.failed && !t.invalid).map(t => t.id));
+      const startedIds = new Set(data.tasksProgress.filter(t => !t.complete && !t.failed && !t.invalid).map(t => t.id));
+
+      // Build objective progress map from TarkovTracker
+      const objProgressMap = {};
+      (data.taskObjectivesProgress || []).forEach(o => {
+        if (!o.invalid) objProgressMap[o.id] = { complete: o.complete, count: o.count || 0 };
+      });
+
+      // Merge into profile
+      const existing = myProfile.tasks || [];
+      const existingIds = new Set(existing.map(t => t.taskId));
+      let newTasks = [...existing];
+      let newProgress = { ...(myProfile.progress || {}) };
+      let added = 0, progressUpdated = 0;
+
+      // Add started (incomplete) tasks that aren't already in list
+      startedIds.forEach(taskId => {
+        if (!existingIds.has(taskId) && !completedIds.has(taskId)) {
+          const apiTask = apiTasks?.find(t => t.id === taskId);
+          if (apiTask) { newTasks.push({ taskId }); added++; }
+        }
+      });
+
+      // Mark completed tasks' objectives as done in progress
+      completedIds.forEach(taskId => {
+        const apiTask = apiTasks?.find(t => t.id === taskId);
+        if (!apiTask) return;
+        if (!existingIds.has(taskId)) { newTasks.push({ taskId }); added++; }
+        (apiTask.objectives || []).filter(o => !o.optional).forEach(obj => {
+          const key = progressKey(myProfile.id, taskId, obj.id);
+          const meta = getObjMeta(obj);
+          if ((newProgress[key] || 0) < meta.total) { newProgress[key] = meta.total; progressUpdated++; }
+        });
+      });
+
+      // Import partial objective progress for started tasks
+      startedIds.forEach(taskId => {
+        const apiTask = apiTasks?.find(t => t.id === taskId);
+        if (!apiTask) return;
+        (apiTask.objectives || []).filter(o => !o.optional).forEach(obj => {
+          const ttObj = objProgressMap[obj.id];
+          if (!ttObj) return;
+          const key = progressKey(myProfile.id, taskId, obj.id);
+          const meta = getObjMeta(obj);
+          if (ttObj.complete) {
+            if ((newProgress[key] || 0) < meta.total) { newProgress[key] = meta.total; progressUpdated++; }
+          } else if (ttObj.count > (newProgress[key] || 0)) {
+            newProgress[key] = ttObj.count; progressUpdated++;
+          }
+        });
+      });
+
+      saveMyProfile({ ...myProfile, tasks: newTasks, progress: newProgress });
+      const level = data.playerLevel ? ` (Level ${data.playerLevel})` : "";
+      setTtSyncMsg(`Synced${level}: ${added} tasks added, ${progressUpdated} objectives updated. ${completedIds.size} completed, ${startedIds.size} in progress.`);
+      setTtSyncStatus("done");
+    } catch (e) {
+      setTtSyncMsg(e.message || "Sync failed.");
+      setTtSyncStatus("error");
+    }
+  }, [ttToken, ttTokenInput, apiTasks, myProfile, saveMyProfile, saveTtToken]);
 
   const traders = useMemo(() => [...new Set((apiTasks || []).map(t => t.trader?.name).filter(Boolean))].sort(traderSort), [apiTasks]);
   const traderImgMap = useMemo(() => Object.fromEntries((apiTraders || []).map(t => [t.name, t.imageLink])), [apiTraders]);
@@ -228,6 +315,44 @@ export default function TasksTab({ myProfile, saveMyProfile, apiTasks, apiTrader
         )}
 
         {/* ── MY TASKS SUB-TAB ── */}
+        {/* ── TARKOVTRACKER SYNC ── */}
+        {profileSub === "tasks" && (
+          <div style={{ marginBottom: 14 }}>
+            <button onClick={() => setTtExpanded(!ttExpanded)} style={{ width: "100%", background: ttExpanded ? T.cyan + "15" : T.surface, border: `1px solid ${ttExpanded ? T.cyanBorder : T.border}`, padding: "10px 12px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", fontFamily: T.sans }}>
+              <span style={{ color: T.cyan, letterSpacing: 1, fontSize: T.fs2 }}>⟳ SYNC FROM TARKOVTRACKER<Tip text="Import your quest progress from TarkovTracker.io. Create a free account there, generate an API token in Settings, and paste it here. Your tasks and objective progress will be imported automatically." /></span>
+              <span style={{ color: T.textDim, fontSize: T.fs2 }}>{ttExpanded ? "▴" : "▾"}</span>
+            </button>
+            {ttExpanded && (
+              <div style={{ background: T.surface, border: `1px solid ${T.cyanBorder}`, borderTop: "none", padding: 12 }}>
+                {ttToken ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                    <div style={{ fontSize: T.fs2, color: T.success, flex: 1 }}>● Token saved</div>
+                    <button onClick={() => { saveTtToken(""); setTtTokenInput(""); setTtSyncStatus("idle"); setTtSyncMsg(""); }} style={{ background: "transparent", border: `1px solid ${T.errorBorder}`, color: T.error, padding: "4px 10px", fontSize: T.fs1, cursor: "pointer", fontFamily: T.sans }}>CLEAR</button>
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ fontSize: T.fs1, color: T.textDim, marginBottom: 6, lineHeight: 1.5 }}>
+                      1. Create a free account at <a href="https://tarkovtracker.io" target="_blank" rel="noreferrer" style={{ color: T.cyan, textDecoration: "none" }}>tarkovtracker.io</a><br />
+                      2. Go to Settings → Create API Token (enable "Read Progression")<br />
+                      3. Paste the token below
+                    </div>
+                    <input value={ttTokenInput} onChange={e => setTtTokenInput(e.target.value)} placeholder="Paste TarkovTracker API token..."
+                      aria-label="TarkovTracker API token"
+                      style={{ width: "100%", background: T.inputBg, border: `1px solid ${T.borderBright}`, color: T.textBright, padding: "8px 10px", fontSize: T.fs2, fontFamily: T.mono, outline: "none", boxSizing: "border-box", marginBottom: 8 }} />
+                  </>
+                )}
+                <button onClick={syncFromTarkovTracker} disabled={ttSyncStatus === "syncing" || (!ttToken && !ttTokenInput.trim())}
+                  style={{ width: "100%", background: ttSyncStatus === "syncing" ? T.textDim : T.cyan, color: T.bg, border: "none", padding: "10px 0", fontSize: T.fs2, fontFamily: T.sans, fontWeight: "bold", letterSpacing: 1.5, cursor: ttSyncStatus === "syncing" ? "default" : "pointer" }}>
+                  {ttSyncStatus === "syncing" ? "SYNCING..." : "⟳ SYNC TASKS"}
+                </button>
+                {ttSyncMsg && (
+                  <div style={{ fontSize: T.fs1, color: ttSyncStatus === "error" ? T.error : T.success, marginTop: 8, lineHeight: 1.5 }}>{ttSyncMsg}</div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {profileSub === "tasks" && (() => {
           const myTasksWithApi = (myProfile.tasks || []).map(t => {
             const apiTask = apiTasks?.find(x => x.id === t.taskId);
