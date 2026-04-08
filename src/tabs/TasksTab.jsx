@@ -2,7 +2,7 @@ import { useState, useRef, useMemo, useCallback } from "react";
 import { T } from '../theme.js';
 import { SL, Badge, Btn, Tip } from '../components/ui/index.js';
 import { getObjMeta, progressKey, getAllPrereqTaskIds } from '../lib/utils.js';
-import { markTaskCompleteInProgress, cleanOrphanedPrereqProgress, computeTaskDepths } from '../lib/taskUtils.js';
+import { markTaskCompleteInProgress, cleanOrphanedPrereqProgress, computeTaskDepths, getAvailableTasks } from '../lib/taskUtils.js';
 import { traderSort } from '../constants.js';
 import { useStorage } from '../hooks/useStorage.js';
 
@@ -96,9 +96,25 @@ export default function TasksTab({ myProfile, saveMyProfile, apiTasks, apiTrader
         });
       });
 
+      // Auto-add available tasks (all prereqs completed, level met)
+      const currentIds = new Set(newTasks.map(t => t.taskId));
+      const available = getAvailableTasks(apiTasks, completedIds, failedIds, currentIds, data.playerLevel || 0);
+      let autoAdded = 0;
+      available.forEach(task => {
+        newTasks.push({ taskId: task.id });
+        autoAdded++;
+        // Mark their prereqs complete in progress
+        const prereqIds = [...new Set(getAllPrereqTaskIds(task.id, apiTasks))];
+        prereqIds.forEach(prereqId => {
+          const prereqTask = apiTasks?.find(t => t.id === prereqId);
+          if (prereqTask) newProgress = markTaskCompleteInProgress(myProfile.id, prereqId, prereqTask, newProgress);
+        });
+      });
+
       saveMyProfile({ ...myProfile, tasks: newTasks, progress: newProgress });
       const level = data.playerLevel ? ` (Level ${data.playerLevel})` : "";
-      setTtSyncMsg(`Synced${level}: ${added} tasks added, ${progressUpdated} objectives updated. ${completedIds.size} completed, ${startedIds.size} in progress.`);
+      const autoMsg = autoAdded > 0 ? ` ${autoAdded} available tasks auto-added.` : "";
+      setTtSyncMsg(`Synced${level}: ${added} tasks added, ${progressUpdated} objectives updated. ${completedIds.size} completed, ${startedIds.size} in progress.${autoMsg}`);
       setTtSyncStatus("done");
     } catch (e) {
       setTtSyncMsg(e.message || "Sync failed.");
@@ -319,7 +335,7 @@ export default function TasksTab({ myProfile, saveMyProfile, apiTasks, apiTrader
         {profileSub === "tasks" && (
           <div style={{ marginBottom: 14 }}>
             <button onClick={() => setTtExpanded(!ttExpanded)} style={{ width: "100%", background: ttExpanded ? T.cyan + "15" : T.surface, border: `1px solid ${ttExpanded ? T.cyanBorder : T.border}`, padding: "10px 12px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", fontFamily: T.sans }}>
-              <span style={{ color: T.cyan, letterSpacing: 1, fontSize: T.fs2 }}>⟳ SYNC FROM TARKOVTRACKER<Tip text="Import your quest progress from TarkovTracker.io. Create a free account there, generate an API token in Settings, and paste it here. Your tasks and objective progress will be imported automatically." /></span>
+              <span style={{ color: T.cyan, letterSpacing: 1, fontSize: T.fs2 }}>⟳ SYNC FROM TARKOVTRACKER<Tip text="Import your quest progress from TarkovTracker.io. Completed tasks sync your progress, and any newly available tasks (all prerequisites done, level met) are automatically added to your task list." /></span>
               <span style={{ color: T.textDim, fontSize: T.fs2 }}>{ttExpanded ? "▴" : "▾"}</span>
             </button>
             {ttExpanded && (

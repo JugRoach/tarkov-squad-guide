@@ -31,6 +31,23 @@ export function cleanOrphanedPrereqProgress(profileId, taskList, apiTasks, progr
   return p;
 }
 
+// ─── AVAILABLE TASKS (unlocked by completed prerequisites) ───
+export function getAvailableTasks(apiTasks, completedIds, failedIds, existingIds, playerLevel) {
+  if (!apiTasks?.length) return [];
+  return apiTasks.filter(task => {
+    // Skip completed, failed, or already-tracked tasks
+    if (completedIds.has(task.id) || failedIds.has(task.id) || existingIds.has(task.id)) return false;
+    // Check player level requirement
+    if (playerLevel && task.minPlayerLevel && task.minPlayerLevel > playerLevel) return false;
+    // Check all prerequisites are completed
+    const reqs = task.taskRequirements || [];
+    return reqs.every(req => {
+      if (!req.status?.includes("complete")) return true; // non-"complete" status reqs don't block
+      return completedIds.has(req.task?.id);
+    });
+  });
+}
+
 // ─── QUEST TREE DEPTH (topological progression order) ────────
 export function computeTaskDepths(apiTasks) {
   if (!apiTasks?.length) return {};
