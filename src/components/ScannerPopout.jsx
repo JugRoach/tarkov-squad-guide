@@ -1,26 +1,5 @@
-import { useState, useEffect, useRef, useCallback } from "react";
 import { T } from "../theme.js";
-import { API_URL } from "../constants.js";
-import { findBestMatch } from "../lib/fuzzyMatch.js";
-
-const ALL_ITEMS_Q = `{items(gameMode:pve){id name shortName width height}}`;
-
-const ITEM_PRICE_Q = (id, gameMode = "pve") =>
-  `{item(id:"${id}", gameMode:${gameMode}){
-    id name shortName width height gridImageLink
-    avg24hPrice basePrice changeLast48hPercent
-    sellFor { price priceRUB currency vendor { name } }
-    buyFor { price priceRUB currency vendor { ... on TraderOffer { name minTraderLevel } ... on FleaMarket { name } } }
-  }}`;
-
-async function fetchGql(query) {
-  const r = await fetch(API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query }),
-  });
-  return (await r.json()).data;
-}
+import { useScanAndFetch } from "../hooks/useScanAndFetch.js";
 
 function formatPrice(price) {
   if (!price && price !== 0) return "\u2014";
@@ -28,110 +7,7 @@ function formatPrice(price) {
 }
 
 export default function ScannerPopout() {
-  const [scanning, setScanning] = useState(false);
-  const [scanStatus, setScanStatus] = useState(null);
-  const [item, setItem] = useState(null);
-  const [itemDb, setItemDb] = useState(null);
-  const [dbLoading, setDbLoading] = useState(true);
-  const lastScanRef = useRef("");
-  const scanIntervalRef = useRef(null);
-  const tauriInvokeRef = useRef(null);
-
-  // Load item database
-  useEffect(() => {
-    fetchGql(ALL_ITEMS_Q)
-      .then((data) => setItemDb(data?.items || []))
-      .catch(() => setItemDb([]))
-      .finally(() => setDbLoading(false));
-  }, []);
-
-  // Load Tauri invoke
-  useEffect(() => {
-    (async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        tauriInvokeRef.current = invoke;
-      } catch (_) {}
-    })();
-  }, []);
-
-  const cleanOcr = useCallback((raw) => {
-    return raw.replace(/[,.:;!|{}\[\]()]/g, "").replace(/\s+/g, " ").trim();
-  }, []);
-
-  const runScan = useCallback(async () => {
-    if (!tauriInvokeRef.current || !itemDb?.length) return;
-    try {
-      const lines = await tauriInvokeRef.current("scan_at_cursor");
-      if (!lines || lines.length === 0) return;
-
-      const raw = lines.join(" ").trim();
-      const cleaned = cleanOcr(raw);
-      if (cleaned === lastScanRef.current || cleaned.length < 2) return;
-      lastScanRef.current = cleaned;
-
-      let bestMatch = findBestMatch(cleaned, itemDb);
-      if (!bestMatch) {
-        const words = cleaned.split(/\s+/).filter((w) => w.length >= 2);
-        words.sort((a, b) => b.length - a.length);
-        for (const word of words) {
-          const match = findBestMatch(word, itemDb);
-          if (match && (!bestMatch || match.score > bestMatch.score)) {
-            bestMatch = match;
-          }
-        }
-      }
-
-      if (bestMatch) {
-        const { item: matched, score } = bestMatch;
-        setScanStatus(`"${cleaned}" \u2192 ${matched.shortName} (${Math.round(score * 100)}%)`);
-        const priced = await fetchGql(ITEM_PRICE_Q(matched.id));
-        if (priced?.item) setItem(priced.item);
-      } else {
-        setScanStatus(`No match: "${cleaned}"`);
-      }
-    } catch (_) {}
-  }, [cleanOcr, itemDb]);
-
-  // Toggle scanning
-  const toggleScanning = useCallback(() => {
-    setScanning((prev) => {
-      const next = !prev;
-      if (next) {
-        lastScanRef.current = "";
-        runScan();
-        scanIntervalRef.current = setInterval(runScan, 750);
-      } else {
-        clearInterval(scanIntervalRef.current);
-        scanIntervalRef.current = null;
-      }
-      return next;
-    });
-  }, [runScan]);
-
-  // Auto-start scanning once DB is loaded
-  useEffect(() => {
-    if (!dbLoading && itemDb?.length && tauriInvokeRef.current && !scanning) {
-      toggleScanning();
-    }
-  }, [dbLoading, itemDb]);
-
-  // Cleanup
-  useEffect(() => {
-    return () => { if (scanIntervalRef.current) clearInterval(scanIntervalRef.current); };
-  }, []);
-
-  // Listen for Alt+S hotkey
-  useEffect(() => {
-    let unlisten;
-    (async () => {
-      try {
-        const { listen } = await import("@tauri-apps/api/event");
-        unlisten = await listen("toggle-scan", () => toggleScanning());
-      } catch (_) {}
-    })();
-    return () => { if (unlisten) unlisten(); };
-  }, [toggleScanning]);
+  const { scanning, scanStatus, item, dbLoading, toggleScanning } = useScanAndFetch({ autoStart: true });
 
   // Derived price data
   const bestSell = item?.sellFor

@@ -4,6 +4,7 @@ import { useStorage } from "./hooks/useStorage.js";
 import { fetchAPI, MAPS_Q, TASKS_Q, HIDEOUT_Q, TRADERS_Q } from "./api.js";
 import { EMAPS } from "./lib/mapData.js";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
+import WelcomeBanner from "./components/WelcomeBanner.jsx";
 
 const TasksTab = lazy(() => import("./tabs/TasksTab.jsx"));
 const RaidTab = lazy(() => import("./tabs/RaidTab.jsx"));
@@ -44,20 +45,33 @@ function DesktopAppInner() {
   const [apiTraders, setApiTraders] = useState([]);
   const [apiLoading, setApiLoading] = useState(false);
   const [apiError, setApiError] = useState(false);
+  const [apiErrorMsg, setApiErrorMsg] = useState("");
   const [hideoutLevels, saveHideoutLevels] = useStorage("tg-hideout-v1", {});
   const [hideoutTarget, saveHideoutTarget] = useStorage("tg-hideout-target-v1", null);
   const [savedBuilds, saveSavedBuilds] = useStorage("tg-builds-v1", []);
   const [pendingRouteTask, setPendingRouteTask] = useState(null);
+  const [welcomed, saveWelcomed] = useStorage("tg-welcomed-v7", false);
+  const [showWelcome, setShowWelcome] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQ, setSearchQ] = useState("");
+  const [apiRetry, setApiRetry] = useState(0);
 
-  // Fetch API data
   useEffect(() => {
-    if (apiMaps || apiLoading) return;
+    if (profileReady && !welcomed) setShowWelcome(true);
+  }, [profileReady, welcomed]);
+
+  // Fetch API data (re-runs when apiRetry bumps)
+  useEffect(() => {
+    let cancelled = false;
     setApiLoading(true);
+    setApiError(false);
+    setApiErrorMsg("");
     (async () => {
       try {
         const [mData, tData, hData, trData] = await Promise.all([
           fetchAPI(MAPS_Q), fetchAPI(TASKS_Q), fetchAPI(HIDEOUT_Q), fetchAPI(TRADERS_Q),
         ]);
+        if (cancelled) return;
         const playable = ["customs","factory","woods","interchange","shoreline","reserve","lighthouse","streets-of-tarkov","the-lab","ground-zero"];
         setApiMaps((mData?.maps || []).filter((m) => playable.includes(m.normalizedName)));
         const seenNames = new Set();
@@ -70,11 +84,44 @@ function DesktopAppInner() {
         setApiHideout(hData?.hideoutStations || []);
         setApiTraders(trData?.traders || []);
       } catch (e) {
+        if (cancelled) return;
         setApiError(true);
+        setApiErrorMsg(String(e?.message || e) || "Unknown error");
       }
-      setApiLoading(false);
+      if (!cancelled) setApiLoading(false);
     })();
-  }, []);
+    return () => { cancelled = true; };
+  }, [apiRetry]);
+
+  // Global search (tasks, maps, extracts, bosses)
+  const searchResults = useMemo(() => {
+    const q = searchQ.toLowerCase().trim();
+    if (q.length < 2) return [];
+    const results = [];
+    (apiTasks || []).filter(t => t.name.toLowerCase().includes(q)).slice(0, 8).forEach(t => {
+      results.push({ type: "Task", name: t.name, detail: `${t.trader?.name || ""}${t.map ? " · " + t.map.name : ""}` });
+    });
+    EMAPS.filter(m => m.name.toLowerCase().includes(q)).forEach(m => {
+      results.push({ type: "Map", name: m.name, detail: m.tier });
+    });
+    EMAPS.forEach(m => {
+      [...(m.pmcExtracts || []), ...(m.scavExtracts || [])].filter(e => e.name.toLowerCase().includes(q)).slice(0, 4).forEach(e => {
+        results.push({ type: "Extract", name: e.name, detail: `${m.name} · ${e.type}` });
+      });
+    });
+    (apiMaps || []).forEach(m => {
+      (m.bosses || []).filter(b => b.boss?.name?.toLowerCase().includes(q)).forEach(b => {
+        results.push({ type: "Boss", name: b.boss.name, detail: `${m.name} · ${Math.round((b.spawnChance || 0) * 100)}%` });
+      });
+    });
+    return results;
+  }, [searchQ, apiTasks, apiMaps]);
+
+  const handleSearchAction = (type) => {
+    if (type === "Task") setTab("tasks");
+    else if (type === "Map" || type === "Extract") setTab("intel");
+    setSearchOpen(false);
+  };
 
   // Overlay toggle
   const toggleOverlay = async () => {
@@ -102,8 +149,42 @@ function DesktopAppInner() {
         color: T.text,
         fontFamily: T.sans,
         overflow: "hidden",
+        position: "relative",
       }}
     >
+      {showWelcome && (
+        <WelcomeBanner onDismiss={() => { setShowWelcome(false); saveWelcomed(true); }} />
+      )}
+
+      {searchOpen && (
+        <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(13,14,16,0.92)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", zIndex: 100, display: "flex", flexDirection: "column", padding: 14 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <input
+              value={searchQ}
+              onChange={e => setSearchQ(e.target.value)}
+              onKeyDown={e => { if (e.key === "Escape") setSearchOpen(false); }}
+              autoFocus
+              placeholder="Search tasks, maps, extracts, bosses..."
+              style={{ flex: 1, background: T.surface, border: `1px solid ${T.borderBright}`, color: T.textBright, padding: "10px 12px", fontSize: T.fs3, fontFamily: T.sans, outline: "none" }}
+            />
+            <button onClick={() => setSearchOpen(false)} style={{ background: "transparent", border: `1px solid ${T.border}`, color: T.textDim, padding: "10px 14px", fontSize: T.fs3, cursor: "pointer", fontFamily: T.sans }}>ESC</button>
+          </div>
+          <div style={{ flex: 1, overflowY: "auto" }}>
+            {searchQ.trim().length < 2 && <div style={{ color: T.textDim, fontSize: T.fs3, textAlign: "center", padding: 20 }}>Type at least 2 characters to search</div>}
+            {searchQ.trim().length >= 2 && searchResults.length === 0 && <div style={{ color: T.textDim, fontSize: T.fs3, textAlign: "center", padding: 20 }}>No results for "{searchQ}"</div>}
+            {searchResults.map((r, i) => (
+              <button key={i} onClick={() => handleSearchAction(r.type)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", background: T.surface, border: `1px solid ${T.border}`, borderLeft: `2px solid ${r.type === "Task" ? T.gold : r.type === "Map" ? T.blue : r.type === "Boss" ? T.error : T.success}`, padding: "10px 12px", marginBottom: 4, cursor: "pointer", textAlign: "left" }}>
+                <div>
+                  <div style={{ color: T.textBright, fontSize: T.fs3, fontWeight: "bold" }}>{r.name}</div>
+                  <div style={{ color: T.textDim, fontSize: T.fs1, marginTop: 2 }}>{r.detail}</div>
+                </div>
+                <span style={{ fontSize: T.fs1, color: T.textDim, fontFamily: T.sans, letterSpacing: 1 }}>{r.type.toUpperCase()}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* ─── SIDEBAR NAV ─────────────────────────────── */}
       <nav
         style={{
@@ -130,6 +211,32 @@ function DesktopAppInner() {
             <div style={{ fontSize: T.fs1, color: T.textDim, letterSpacing: 2, marginTop: 2 }}>GUIDE</div>
           )}
         </div>
+
+        {/* Search button */}
+        <button
+          onClick={() => { setSearchOpen(true); setSearchQ(""); }}
+          title="Search tasks, maps, extracts, bosses"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: overlayMode ? "10px 0" : "10px 12px",
+            justifyContent: overlayMode ? "center" : "flex-start",
+            background: "transparent",
+            border: "none",
+            borderLeft: "3px solid transparent",
+            borderBottom: `1px solid ${T.border}`,
+            cursor: "pointer",
+            color: T.textDim,
+            fontFamily: T.sans,
+            fontSize: T.fs2,
+            letterSpacing: 0.5,
+            width: "100%",
+          }}
+        >
+          <span style={{ fontSize: T.fs4, flexShrink: 0 }}>🔍</span>
+          {!overlayMode && <span style={{ textTransform: "uppercase" }}>Search</span>}
+        </button>
 
         {/* Nav items */}
         {NAV_ITEMS.map((item) => (
@@ -203,6 +310,44 @@ function DesktopAppInner() {
 
       {/* ─── CONTENT AREA ────────────────────────────── */}
       <main style={{ overflow: "hidden", display: "flex", flexDirection: "column" }}>
+        {apiError && (
+          <div style={{
+            background: T.errorBg || "rgba(200,80,80,0.08)",
+            borderBottom: `1px solid ${T.error}`,
+            color: T.error,
+            padding: "6px 12px",
+            fontSize: T.fs1,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+            flexShrink: 0,
+          }}>
+            <span>
+              <strong>tarkov.dev unreachable.</strong>
+              {apiErrorMsg && <span style={{ color: T.textDim, marginLeft: 6 }}>{apiErrorMsg}</span>}
+            </span>
+            <button
+              onClick={() => setApiRetry(n => n + 1)}
+              disabled={apiLoading}
+              style={{
+                background: "transparent",
+                border: `1px solid ${T.error}`,
+                color: T.error,
+                padding: "2px 10px",
+                fontSize: T.fs1,
+                fontFamily: T.sans,
+                cursor: apiLoading ? "wait" : "pointer",
+                borderRadius: T.r1,
+                letterSpacing: 0.5,
+                whiteSpace: "nowrap",
+                opacity: apiLoading ? 0.6 : 1,
+              }}
+            >
+              {apiLoading ? "RETRYING…" : "RETRY"}
+            </button>
+          </div>
+        )}
         <Suspense
           fallback={
             <div

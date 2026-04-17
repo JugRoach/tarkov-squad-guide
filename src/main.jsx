@@ -1,6 +1,5 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import TarkovGuide from './TarkovGuide.jsx'
 import DesktopApp from './DesktopApp.jsx'
 import ScannerPopout from './components/ScannerPopout.jsx'
 import { supabase } from './supabase.js'
@@ -17,6 +16,15 @@ function getDeviceId() {
 }
 
 const deviceId = getDeviceId()
+
+// Warn once per session if cross-device sync is silently failing — avoids
+// false "my data is synced" belief while also keeping the console quiet.
+let syncWarned = false
+function warnSyncOnce(op, err) {
+  if (syncWarned) return
+  syncWarned = true
+  console.warn(`[TG] Supabase ${op} failed — data saved locally only. Cross-device sync disabled for this session.`, err)
+}
 
 // Cloud-backed storage with localStorage as fast cache
 // Falls back to pure localStorage if Supabase is unavailable
@@ -51,14 +59,15 @@ window.storage = {
     // Write-through to Supabase
     if (supabase) {
       try {
-        await supabase
+        const { error } = await supabase
           .from('user_storage')
           .upsert(
             { user_id: deviceId, key, value, updated_at: new Date().toISOString() },
             { onConflict: 'user_id,key' }
           )
+        if (error) warnSyncOnce('write', error)
       } catch (e) {
-        if (import.meta.env.DEV) console.warn('[TG] Supabase write failed:', e)
+        warnSyncOnce('write', e)
       }
     }
     return { key, value }

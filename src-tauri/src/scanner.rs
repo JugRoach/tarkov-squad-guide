@@ -153,11 +153,15 @@ fn group_into_lines(words: &[Word]) -> Vec<Line> {
     lines
 }
 
-/// Detect the Tarkov tooltip: a vertical stack of ≥3 lines with aligned left
+/// Detect the Tarkov tooltip: a vertical stack of ≥2 lines with aligned left
 /// edges (the tooltip is left-justified) and reasonable vertical spacing.
 /// Returns the TOP line's text (the bolded item name).
+///
+/// MIN_CHAIN_LEN is 2 so short tooltips (ammo, simple consumables — often
+/// just name + 1 stat line) still use the title path instead of falling back
+/// to cursor proximity, which is less accurate for multi-slot items.
 fn detect_tooltip_title(lines: &[Line]) -> Option<String> {
-    if lines.len() < 3 {
+    if lines.len() < 2 {
         return None;
     }
 
@@ -166,7 +170,7 @@ fn detect_tooltip_title(lines: &[Line]) -> Option<String> {
     const LEFT_TOLERANCE: f64 = 20.0;
     const MIN_GAP: f64 = 15.0;
     const MAX_GAP: f64 = 90.0;
-    const MIN_CHAIN_LEN: usize = 3;
+    const MIN_CHAIN_LEN: usize = 2;
 
     let mut best_chain: Vec<usize> = Vec::new();
 
@@ -215,14 +219,55 @@ fn detect_tooltip_title(lines: &[Line]) -> Option<String> {
 
 /// 2x upscale + luminance contrast stretch. Output is BGRA (ready for
 /// SoftwareBitmap), since the OCR path expects BGRA anyway.
+///
+/// Thresholds are auto-calibrated from the capture's histogram (5th/95th
+/// percentile) so the stretch adapts to the user's display brightness, HDR,
+/// and in-game gamma instead of relying on hardcoded LO/HI values.
 fn preprocess(rgba: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
     let scale: u32 = 2;
     let new_w = width * scale;
     let new_h = height * scale;
     let mut out = vec![0u8; (new_w * new_h * 4) as usize];
 
-    const LO: i32 = 70;
-    const HI: i32 = 180;
+    // Build a luminance histogram of the source pixels.
+    let mut hist = [0u32; 256];
+    let src_len = (width * height) as usize;
+    for i in 0..src_len {
+        let idx = i * 4;
+        let r = rgba[idx] as u32;
+        let g = rgba[idx + 1] as u32;
+        let b = rgba[idx + 2] as u32;
+        let lum = (r * 299 + g * 587 + b * 114) / 1000;
+        hist[lum as usize] += 1;
+    }
+
+    // Pick LO = 5th percentile, HI = 95th percentile. Clamp to sane defaults
+    // if the capture is near-uniform (all-black startup screen, etc.).
+    let total = src_len as u32;
+    let lo_target = total / 20;
+    let hi_target = total - total / 20;
+    let mut lo: i32 = 0;
+    let mut hi: i32 = 255;
+    let mut acc: u32 = 0;
+    let mut lo_set = false;
+    for (v, &count) in hist.iter().enumerate() {
+        acc += count;
+        if !lo_set && acc >= lo_target {
+            lo = v as i32;
+            lo_set = true;
+        }
+        if acc >= hi_target {
+            hi = v as i32;
+            break;
+        }
+    }
+    // Require a minimum contrast window so a near-uniform capture doesn't
+    // collapse to a degenerate lo==hi stretch that divides by zero.
+    if hi - lo < 40 {
+        lo = (lo - 20).max(0);
+        hi = (hi + 20).min(255);
+    }
+    let range = (hi - lo).max(1);
 
     for y in 0..new_h {
         let src_y = y / scale;
@@ -233,12 +278,12 @@ fn preprocess(rgba: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
             let g = rgba[src_idx + 1] as i32;
             let b = rgba[src_idx + 2] as i32;
             let lum = (r * 299 + g * 587 + b * 114) / 1000;
-            let stretched = if lum <= LO {
+            let stretched = if lum <= lo {
                 0
-            } else if lum >= HI {
+            } else if lum >= hi {
                 255
             } else {
-                ((lum - LO) * 255 / (HI - LO)).clamp(0, 255)
+                ((lum - lo) * 255 / range).clamp(0, 255)
             } as u8;
 
             let dst_idx = ((y * new_w + x) * 4) as usize;

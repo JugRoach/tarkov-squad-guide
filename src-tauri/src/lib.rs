@@ -66,58 +66,66 @@ pub fn run() {
             close_scanner_popout,
         ])
         .setup(|app| {
-            // Alt+T: toggle overlay visibility
-            let handle = app.handle().clone();
-            let toggle_shortcut = Shortcut::new(Some(Modifiers::ALT), Code::KeyT);
-            app.global_shortcut().on_shortcut(toggle_shortcut, move |_app, _shortcut, event| {
-                if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                    if let Some(window) = handle.get_webview_window("main") {
-                        if window.is_visible().unwrap_or(false) {
-                            let _ = window.hide();
-                        } else {
-                            let _ = window.show();
-                            let _ = window.set_focus();
+            use tauri_plugin_global_shortcut::ShortcutState;
+
+            // Clear any stale registrations (survives a prior crashed instance
+            // that didn't release its hotkeys) so our registers below don't
+            // silently fail on a "hotkey already registered" error.
+            let _ = app.global_shortcut().unregister_all();
+
+            fn register<F>(
+                app: &tauri::AppHandle,
+                code: Code,
+                handler: F,
+            ) -> Result<(), tauri_plugin_global_shortcut::Error>
+            where
+                F: Fn(&tauri::AppHandle) + Send + Sync + 'static,
+            {
+                let handle = app.clone();
+                let shortcut = Shortcut::new(Some(Modifiers::ALT), code);
+                app.global_shortcut()
+                    .on_shortcut(shortcut, move |_app, _sc, event| {
+                        if event.state == ShortcutState::Pressed {
+                            handler(&handle);
                         }
+                    })
+            }
+
+            // Alt+T: toggle main window visibility
+            register(app.handle(), Code::KeyT, |h| {
+                if let Some(window) = h.get_webview_window("main") {
+                    if window.is_visible().unwrap_or(false) {
+                        let _ = window.hide();
+                    } else {
+                        let _ = window.show();
+                        let _ = window.set_focus();
                     }
                 }
             })?;
 
-            // Alt+O: toggle overlay mode
-            let handle2 = app.handle().clone();
-            let overlay_shortcut = Shortcut::new(Some(Modifiers::ALT), Code::KeyO);
-            app.global_shortcut().on_shortcut(overlay_shortcut, move |_app, _shortcut, event| {
-                if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                    if let Some(window) = handle2.get_webview_window("main") {
-                        let _ = window.emit("toggle-overlay", ());
-                    }
+            // Alt+O: toggle overlay mode (frontend handles via event)
+            register(app.handle(), Code::KeyO, |h| {
+                if let Some(window) = h.get_webview_window("main") {
+                    let _ = window.emit("toggle-overlay", ());
                 }
             })?;
 
-            // Alt+S: toggle auto-scan mode (handled by frontend via invoke)
-            let handle3 = app.handle().clone();
-            let scan_shortcut = Shortcut::new(Some(Modifiers::ALT), Code::KeyS);
-            app.global_shortcut().on_shortcut(scan_shortcut, move |_app, _shortcut, event| {
-                if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                    // Emit to both main and popout windows
-                    if let Some(window) = handle3.get_webview_window("main") {
-                        let _ = window.emit("toggle-scan", ());
-                    }
-                    if let Some(window) = handle3.get_webview_window("scanner-popout") {
-                        let _ = window.emit("toggle-scan", ());
-                    }
+            // Alt+S: toggle auto-scan (fanout to main + popout)
+            register(app.handle(), Code::KeyS, |h| {
+                if let Some(window) = h.get_webview_window("main") {
+                    let _ = window.emit("toggle-scan", ());
+                }
+                if let Some(window) = h.get_webview_window("scanner-popout") {
+                    let _ = window.emit("toggle-scan", ());
                 }
             })?;
 
             // Alt+P: toggle scanner popout window
-            let handle4 = app.handle().clone();
-            let popout_shortcut = Shortcut::new(Some(Modifiers::ALT), Code::KeyP);
-            app.global_shortcut().on_shortcut(popout_shortcut, move |_app, _shortcut, event| {
-                if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                    if let Some(w) = handle4.get_webview_window("scanner-popout") {
-                        let _ = w.close();
-                    } else {
-                        let _ = open_scanner_popout(handle4.clone());
-                    }
+            register(app.handle(), Code::KeyP, |h| {
+                if let Some(w) = h.get_webview_window("scanner-popout") {
+                    let _ = w.close();
+                } else {
+                    let _ = open_scanner_popout(h.clone());
                 }
             })?;
 

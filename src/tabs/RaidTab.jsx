@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, lazy, Suspense } from "react";
 import { T } from '../theme.js';
 import { SL, Badge, Btn, Tip } from '../components/ui/index.js';
 import { getObjMeta, worldToPct, nearestNeighbor } from '../lib/utils.js';
@@ -10,7 +10,8 @@ import { fetchAPI, ITEMS_SEARCH_Q } from '../api.js';
 import { traderSort } from '../constants.js';
 import { useStorage } from '../hooks/useStorage.js';
 import { useSquadRoom } from '../hooks/useSquadRoom.js';
-import MapOverlay from '../components/MapOverlay.jsx';
+// MapOverlay is lazy so Leaflet (~70KB + CSS) only loads when a route is rendered
+const MapOverlay = lazy(() => import('../components/MapOverlay.jsx'));
 import MapRecommendation from '../components/MapRecommendation.jsx';
 import ExtractSelector from '../components/ExtractSelector.jsx';
 import PostRaidTracker from '../components/PostRaidTracker.jsx';
@@ -53,6 +54,7 @@ export default function RaidTab({ myProfile, saveMyProfile, apiMaps, apiTasks, a
   const [manualPickMapId, setManualPickMapId] = useState(null);
   const [manualPickOverrides, setManualPickOverrides] = useState(null);
   const qiDebounce = useRef(null);
+  const equipDebounce = useRef(null);
 
   // Handle pending route task from profile screen
   useEffect(() => {
@@ -80,6 +82,20 @@ export default function RaidTab({ myProfile, saveMyProfile, apiMaps, apiTasks, a
     } catch(e) { setEquipResults([]); }
     setEquipSearching(false);
   };
+
+  // Auto-search equipment with 300ms debounce as user types
+  useEffect(() => {
+    const term = equipSearch.trim();
+    clearTimeout(equipDebounce.current);
+    if (term.length < 2) {
+      setEquipResults(null);
+      setEquipSearching(false);
+      return;
+    }
+    setEquipSearching(true);
+    equipDebounce.current = setTimeout(() => { searchEquipment(term); }, 300);
+    return () => clearTimeout(equipDebounce.current);
+  }, [equipSearch]);
 
   // Score loot points by tag relevance, return top 3 — exact tag matches score 3, "Barter item" gets 1
   const rankLootPoints = (lootPoints, neededTags) => {
@@ -332,7 +348,9 @@ export default function RaidTab({ myProfile, saveMyProfile, apiMaps, apiTasks, a
       </div>
       <div style={{ flex: 1, overflowY: "auto", padding: "14px 5%" }}>
         <div aria-live="polite" style={{ maxWidth: 900, margin: "0 auto" }}>
-          <MapOverlay apiMap={selectedMap} emap={emap} route={route} conflicts={conflicts} onConflictResolve={handleConflictResolve} />
+          <Suspense fallback={<div style={{ padding: 30, textAlign: "center", color: T.textDim, fontSize: T.fs2 }}>Loading map…</div>}>
+            <MapOverlay apiMap={selectedMap} emap={emap} route={route} conflicts={conflicts} onConflictResolve={handleConflictResolve} />
+          </Suspense>
 
           {/* Keys for this raid */}
           {routeMode === "tasks" && selectedMap?.locks?.length > 0 && route.some(w => w.pct && !w.isExtract) && (() => {
