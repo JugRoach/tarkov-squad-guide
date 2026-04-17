@@ -10,7 +10,8 @@
     "test:watch": "vitest",
     "lint": "eslint src/",
     "desktop": "tauri dev",
-    "desktop:build": "tauri build"
+    "desktop:build": "tauri build",
+    "tauri": "tauri"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.99.3",
