@@ -21,6 +21,10 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
+      // Manual registration in src/main.jsx so we can skip the SW entirely
+      // when running inside Tauri — the desktop build bundles assets in the
+      // .exe, and a stale SW would block auto-updates from taking effect.
+      injectRegister: null,
       manifest: {
         name: 'Tarkov Guide',
         short_name: 'TarkovGuide',

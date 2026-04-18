@@ -4,6 +4,30 @@ import DesktopApp from './DesktopApp.jsx'
 import ScannerPopout from './components/ScannerPopout.jsx'
 import { supabase } from './supabase.js'
 
+// Service worker handling. In Tauri the .exe bundles all frontend assets and
+// the built-in updater replaces the binary wholesale — a PWA service worker
+// from a previous install would cache stale JS/CSS across updates and make
+// the auto-update effectively invisible until the webview cache is cleared.
+// So: unregister any SW + purge cache storage on Tauri launch, and only
+// register the SW in actual web (PWA) contexts.
+const IS_TAURI = typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__
+if ('serviceWorker' in navigator) {
+  if (IS_TAURI) {
+    navigator.serviceWorker.getRegistrations()
+      .then((regs) => { for (const reg of regs) reg.unregister() })
+      .catch(() => {})
+    if (typeof caches !== 'undefined') {
+      caches.keys()
+        .then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
+        .catch(() => {})
+    }
+  } else {
+    import('virtual:pwa-register')
+      .then(({ registerSW }) => registerSW({ immediate: true }))
+      .catch(() => {})
+  }
+}
+
 
 // Generate or retrieve a stable device ID
 function getDeviceId() {
