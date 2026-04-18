@@ -45,6 +45,9 @@ export function useSquadRoom(myProfile) {
       pmcLevel: myProfile.pmcLevel ?? 1,
       traderLevels: myProfile.traderLevels || {},
       raidHistory: myProfile.raidHistory || [],
+      completedTasks: myProfile.completedTasks || [],
+      failedTasks: myProfile.failedTasks || [],
+      activeTasks: myProfile.activeTasks || [],
       lastLogSync: myProfile.lastLogSync || null,
     };
     supabase.from("squad_members").upsert(
@@ -61,6 +64,9 @@ export function useSquadRoom(myProfile) {
     JSON.stringify(myProfile?.progress),
     JSON.stringify(myProfile?.traderLevels),
     myProfile?.raidHistory?.length,
+    myProfile?.completedTasks?.length,
+    myProfile?.failedTasks?.length,
+    myProfile?.activeTasks?.length,
   ]);
 
   // Leader heartbeat: update heartbeat_at in route_config every 15s

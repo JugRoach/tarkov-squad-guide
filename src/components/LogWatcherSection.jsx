@@ -43,10 +43,13 @@ function prettyMap(raw) {
   return MAP[raw] || raw;
 }
 
-function buildRaidHistory(sessions) {
-  // Flatten: each session's events in order with session index
-  const starts = new Map(); // shortId -> {start, map, gameMode, session}
+function buildLogSummary(sessions) {
+  const starts = new Map();
   const raids = [];
+  const completedTasks = new Map(); // questId -> { ts, traderId }
+  const failedTasks = new Map();
+  const startedTasks = new Map();
+
   for (const session of sessions) {
     for (const ev of session.events || []) {
       if (ev.type === "raidStarted") {
@@ -68,22 +71,35 @@ function buildRaidHistory(sessions) {
           });
           starts.delete(ev.shortId);
         } else {
-          // End without start — show anyway
           raids.push({ shortId: ev.shortId, map: ev.map, gameMode: "", start: null, end: ev.ts, durationMs: null, complete: true });
         }
+      } else if (ev.type === "taskFinished") {
+        completedTasks.set(ev.questId, { ts: ev.ts, traderId: ev.traderId });
+      } else if (ev.type === "taskFailed") {
+        failedTasks.set(ev.questId, { ts: ev.ts, traderId: ev.traderId });
+      } else if (ev.type === "taskStarted") {
+        startedTasks.set(ev.questId, { ts: ev.ts, traderId: ev.traderId });
       }
     }
   }
-  // Any unpaired starts = raid still in progress (or crashed mid-raid)
   for (const s of starts.values()) {
     raids.push({ shortId: s.shortId, map: s.map, gameMode: s.gameMode, start: s.startTs, end: null, durationMs: null, complete: false });
   }
   raids.sort((a, b) => {
     const ta = parseTs(a.start || a.end)?.getTime() || 0;
     const tb = parseTs(b.start || b.end)?.getTime() || 0;
-    return tb - ta; // newest first
+    return tb - ta;
   });
-  return raids;
+  return {
+    raids,
+    completedTaskIds: Array.from(completedTasks.keys()),
+    failedTaskIds: Array.from(failedTasks.keys()),
+    // A task counts as "active" if it started but we haven't seen it
+    // complete/fail afterwards.
+    activeTaskIds: Array.from(startedTasks.keys()).filter(
+      (id) => !completedTasks.has(id) && !failedTasks.has(id)
+    ),
+  };
 }
 
 export default function LogWatcherSection({ myProfile, saveMyProfile }) {
@@ -92,6 +108,11 @@ export default function LogWatcherSection({ myProfile, saveMyProfile }) {
   const [scanning, setScanning] = useState(false);
   const [raids, setRaids] = useState(() => myProfile?.raidHistory || null);
   const [sessionCount, setSessionCount] = useState(0);
+  const [taskCounts, setTaskCounts] = useState({
+    completed: myProfile?.completedTasks?.length || 0,
+    failed: myProfile?.failedTasks?.length || 0,
+    active: myProfile?.activeTasks?.length || 0,
+  });
   const [lastScannedAt, setLastScannedAt] = useState(
     myProfile?.lastLogSync ? new Date(myProfile.lastLogSync) : null
   );
@@ -118,18 +139,25 @@ export default function LogWatcherSection({ myProfile, saveMyProfile }) {
       const { invoke } = await import("@tauri-apps/api/core");
       const sessions = await invoke("scan_logs_dir", { logsDir });
       setSessionCount(Array.isArray(sessions) ? sessions.length : 0);
-      const history = buildRaidHistory(sessions || []);
-      setRaids(history);
+      const summary = buildLogSummary(sessions || []);
+      setRaids(summary.raids);
+      setTaskCounts({
+        completed: summary.completedTaskIds.length,
+        failed: summary.failedTaskIds.length,
+        active: summary.activeTaskIds.length,
+      });
       const now = new Date();
       setLastScannedAt(now);
-      // Persist completed raids into the profile (dedup by shortId, most
-      // recent entries win). Existing Supabase squad-room sync will push
-      // the updated profile shape to any room Matt is in.
+      // Persist everything into the profile. Supabase squad-room sync picks
+      // up the updated profile shape automatically.
       if (typeof saveMyProfile === "function" && myProfile) {
-        const completed = history.filter((r) => r.complete);
+        const completedRaids = summary.raids.filter((r) => r.complete);
         saveMyProfile({
           ...myProfile,
-          raidHistory: completed,
+          raidHistory: completedRaids,
+          completedTasks: summary.completedTaskIds,
+          failedTasks: summary.failedTaskIds,
+          activeTasks: summary.activeTaskIds,
           lastLogSync: now.toISOString(),
         });
       }
@@ -182,9 +210,27 @@ export default function LogWatcherSection({ myProfile, saveMyProfile }) {
         {error && <div style={{ fontSize: T.fs1, color: T.error, marginTop: 8 }}>{error}</div>}
         {raids && (
           <div style={{ marginTop: 12 }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+              <div style={{ flex: 1, background: T.inputBg, border: `1px solid ${T.border}`, padding: "6px 8px", textAlign: "center" }}>
+                <div style={{ fontSize: T.fs1, color: T.textDim, letterSpacing: 0.8 }}>COMPLETED</div>
+                <div style={{ fontSize: T.fs3, color: T.success, fontWeight: "bold" }}>{taskCounts.completed}</div>
+              </div>
+              <div style={{ flex: 1, background: T.inputBg, border: `1px solid ${T.border}`, padding: "6px 8px", textAlign: "center" }}>
+                <div style={{ fontSize: T.fs1, color: T.textDim, letterSpacing: 0.8 }}>ACTIVE</div>
+                <div style={{ fontSize: T.fs3, color: T.cyan, fontWeight: "bold" }}>{taskCounts.active}</div>
+              </div>
+              <div style={{ flex: 1, background: T.inputBg, border: `1px solid ${T.border}`, padding: "6px 8px", textAlign: "center" }}>
+                <div style={{ fontSize: T.fs1, color: T.textDim, letterSpacing: 0.8 }}>FAILED</div>
+                <div style={{ fontSize: T.fs3, color: taskCounts.failed > 0 ? T.error : T.textDim, fontWeight: "bold" }}>{taskCounts.failed}</div>
+              </div>
+              <div style={{ flex: 1, background: T.inputBg, border: `1px solid ${T.border}`, padding: "6px 8px", textAlign: "center" }}>
+                <div style={{ fontSize: T.fs1, color: T.textDim, letterSpacing: 0.8 }}>RAIDS</div>
+                <div style={{ fontSize: T.fs3, color: T.gold, fontWeight: "bold" }}>{raids.filter(r => r.complete).length}</div>
+              </div>
+            </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
               <div style={{ fontSize: T.fs1, color: T.textDim, letterSpacing: 0.8 }}>
-                RAID HISTORY · {raids.length} raid{raids.length === 1 ? "" : "s"} across {sessionCount} session{sessionCount === 1 ? "" : "s"}
+                RAID HISTORY · across {sessionCount} session{sessionCount === 1 ? "" : "s"}
               </div>
               {lastScannedAt && (
                 <div style={{ fontSize: T.fs1, color: T.textDim }}>

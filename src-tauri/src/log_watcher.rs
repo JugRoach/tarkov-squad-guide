@@ -35,6 +35,9 @@ pub enum LogEvent {
     RaidStarted { map: String, game_mode: String, short_id: String, ts: String },
     RaidLocationLoaded { seconds: f64, ts: String },
     RaidEnded { map: String, short_id: String, ts: String },
+    TaskStarted { quest_id: String, trader_id: String, ts: String },
+    TaskFailed { quest_id: String, trader_id: String, ts: String },
+    TaskFinished { quest_id: String, trader_id: String, ts: String },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -179,15 +182,50 @@ fn parse_notifications_log(text: &str, events: &mut Vec<LogEvent>) {
         let line = lines[i];
         if let Some(rest) = line.strip_prefix_find("Got notification | ") {
             let kind = rest.trim();
+            let ts = timestamp_of(line).unwrap_or("").to_string();
+
             if kind == "UserMatchOver" {
-                let ts = timestamp_of(line).unwrap_or("").to_string();
-                // Accumulate lines until the JSON body is balanced.
                 if let Some((json, consumed)) = collect_json_block(&lines[i + 1..]) {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
                         let map = v.get("location").and_then(|x| x.as_str()).unwrap_or("").to_string();
                         let short_id = v.get("shortId").and_then(|x| x.as_str()).unwrap_or("").to_string();
                         if !short_id.is_empty() {
                             events.push(LogEvent::RaidEnded { map, short_id, ts });
+                        }
+                    }
+                    i += consumed + 1;
+                    continue;
+                }
+            }
+
+            // Task state transitions ride the normal ChatMessage system —
+            // traders "message" you when you start / finish / fail a task.
+            // MessageType codes (from TarkovMonitor): 10=Started, 11=Failed,
+            // 12=Finished. The quest ID is the first 24-hex-char ObjectId
+            // at the start of templateId.
+            if kind == "ChatMessageReceived" {
+                if let Some((json, consumed)) = collect_json_block(&lines[i + 1..]) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
+                        if let Some(msg) = v.get("message") {
+                            let msg_type = msg.get("type").and_then(|x| x.as_i64()).unwrap_or(0);
+                            if msg_type == 10 || msg_type == 11 || msg_type == 12 {
+                                let template_id = msg.get("templateId").and_then(|x| x.as_str()).unwrap_or("");
+                                let quest_id = template_id
+                                    .split_whitespace()
+                                    .next()
+                                    .unwrap_or("")
+                                    .to_string();
+                                let trader_id = msg.get("uid").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                                if quest_id.len() == 24 && quest_id.chars().all(|c| c.is_ascii_hexdigit()) {
+                                    let ev = match msg_type {
+                                        10 => LogEvent::TaskStarted { quest_id, trader_id, ts },
+                                        11 => LogEvent::TaskFailed { quest_id, trader_id, ts },
+                                        12 => LogEvent::TaskFinished { quest_id, trader_id, ts },
+                                        _ => unreachable!(),
+                                    };
+                                    events.push(ev);
+                                }
+                            }
                         }
                     }
                     i += consumed + 1;
