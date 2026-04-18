@@ -26,8 +26,8 @@ export default defineConfig({
       // .exe, and a stale SW would block auto-updates from taking effect.
       injectRegister: null,
       manifest: {
-        name: 'Tarkov Guide',
-        short_name: 'TarkovGuide',
+        name: 'Tarkov Planner',
+        short_name: 'TarkovPlanner',
         description: 'PvE Field Reference — Squad Route Planner',
         theme_color: '#07090b',
         background_color: '#07090b',

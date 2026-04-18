@@ -40,10 +40,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: "Tarkov Guide ${{ github.ref_name }}"
+          releaseName: "Tarkov Planner ${{ github.ref_name }}"
           releaseBody: |
             ## Install
-            Download `Tarkov.Guide_*_x64-setup.exe` below and run it.
+            Download `Tarkov.Planner_*_x64-setup.exe` below and run it.
 
             Existing installs auto-update via the Profile tab → Check for Updates.
           releaseDraft: false

@@ -9,9 +9,9 @@ fn set_overlay_mode(window: tauri::WebviewWindow, enabled: bool) -> Result<(), S
     let _ = window.set_ignore_cursor_events(false);
     window.set_always_on_top(enabled).map_err(|e| e.to_string())?;
     if enabled {
-        let _ = window.set_title("Tarkov Guide — OVERLAY");
+        let _ = window.set_title("Tarkov Planner — OVERLAY");
     } else {
-        let _ = window.set_title("Tarkov Guide");
+        let _ = window.set_title("Tarkov Planner");
     }
     let _ = window.set_focus();
     Ok(())
@@ -34,8 +34,8 @@ fn open_scanner_popout_on_main(app: &tauri::AppHandle) {
     }
     let _ = WebviewWindowBuilder::new(app, "scanner-popout", WebviewUrl::App("index.html?window=scanner-popout".into()))
         .title("Scanner")
-        .inner_size(340.0, 220.0)
-        .min_inner_size(280.0, 160.0)
+        .inner_size(320.0, 140.0)
+        .min_inner_size(240.0, 100.0)
         .always_on_top(true)
         .resizable(true)
         .decorations(true)

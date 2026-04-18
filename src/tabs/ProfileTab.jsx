@@ -64,7 +64,7 @@ function DesktopAppSection() {
       <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderLeft: `2px solid ${T.gold}`, padding: 12, marginBottom: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
           <div>
-            <div style={{ fontSize: T.fs3, color: T.textBright, fontWeight: "bold" }}>Tarkov Guide</div>
+            <div style={{ fontSize: T.fs3, color: T.textBright, fontWeight: "bold" }}>Tarkov Planner</div>
             <div style={{ fontSize: T.fs1, color: T.textDim, marginTop: 2 }}>Version {APP_VERSION}</div>
           </div>
           <button
@@ -348,9 +348,9 @@ export default function ProfileTab({ myProfile, saveMyProfile, setTab }) {
           <div style={{ fontSize: T.fs2, color: T.text, lineHeight: 1.8 }}>Add this app to your home screen. Runs full-screen, appears in your app launcher — no app store required.</div>
         </div>
         {[
-          { platform: "iPhone / iPad", color: T.purple, steps: ["Open this page in Safari (must be Safari, not Chrome)", "Tap the Share icon (box with arrow pointing up)", "Scroll down and tap Add to Home Screen", "Name it Tarkov Guide and tap Add"] },
+          { platform: "iPhone / iPad", color: T.purple, steps: ["Open this page in Safari (must be Safari, not Chrome)", "Tap the Share icon (box with arrow pointing up)", "Scroll down and tap Add to Home Screen", "Name it Tarkov Planner and tap Add"] },
           { platform: "Android", color: T.success, steps: ["Open this page in Chrome", "Tap the ⋮ menu (top-right)", "Tap Add to Home screen or Install app", "Tap Add or Install to confirm"] },
-          { platform: "Windows / Mac (Chrome or Edge)", color: T.gold, steps: ["Open this page in Chrome or Edge", "Look for the install icon (⊕) in the address bar", "Or: ⋮ menu → Save and share → Install page as app", "Name it Tarkov Guide and click Install"] },
+          { platform: "Windows / Mac (Chrome or Edge)", color: T.gold, steps: ["Open this page in Chrome or Edge", "Look for the install icon (⊕) in the address bar", "Or: ⋮ menu → Save and share → Install page as app", "Name it Tarkov Planner and click Install"] },
         ].map(({ platform, color, steps }) => (
           <div key={platform} style={{ background: T.surface, border: `1px solid ${color}33`, borderLeft: `2px solid ${color}`, padding: 12, marginBottom: 10 }}>
             <div style={{ color, fontSize: T.fs2, fontWeight: "bold", marginBottom: 8 }}>{platform}</div>

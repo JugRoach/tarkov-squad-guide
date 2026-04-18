@@ -281,12 +281,14 @@ export default function TasksTab({ myProfile, saveMyProfile, apiTasks, apiTrader
                   }
                 });
               });
+              const completedFromLogsSet = new Set(myProfile.completedTasks || []);
               return browseTasks.map(task => {
                 const added = myProfile.tasks?.some(t => t.taskId === task.id);
                 const prereqDone = !added && myPrereqIds.has(task.id);
+                const autoCompleted = completedFromLogsSet.has(task.id);
                 const prog = myProfile.progress || {};
                 const reqObjs = (task.objectives || []).filter(o => !o.optional);
-                const browseComplete = added && reqObjs.length > 0 && reqObjs.every(obj => { const k = `${myProfile.id}-${task.id}-${obj.id}`; const meta = getObjMeta(obj); return (prog[k] || 0) >= meta.total; });
+                const browseComplete = autoCompleted || (added && reqObjs.length > 0 && reqObjs.every(obj => { const k = `${myProfile.id}-${task.id}-${obj.id}`; const meta = getObjMeta(obj); return (prog[k] || 0) >= meta.total; }));
                 const cardBg = browseComplete ? T.successBg : prereqDone ? T.successBg : T.surface;
                 const cardBorder = browseComplete ? T.successBorder : added ? myProfile.color : prereqDone ? T.successBorder : T.border;
                 const cardLeft = browseComplete ? T.success : added ? myProfile.color : prereqDone ? T.success : T.border;
@@ -314,6 +316,7 @@ export default function TasksTab({ myProfile, saveMyProfile, apiTasks, apiTrader
                       {task.minPlayerLevel > 1 && <Badge label={`Lvl ${task.minPlayerLevel}+`} color={T.textDim} />}
                       <Badge label={`${(task.objectives || []).filter(o => !o.optional).length} obj`} color={T.textDim} />
                       {unlocksMap[task.id] > 0 && <Badge label={`unlocks ${unlocksMap[task.id]}`} color={T.cyan} />}
+                      {autoCompleted && <Badge label="AUTO" color={T.cyan} />}
                       {(task.objectives || []).some(o => o.zones?.length > 0 || o.possibleLocations?.length > 0) && <Badge label="has pins" color={T.success} />}
                     </div>
                     {task.objectives?.filter(o => !o.optional).slice(0, 2).map(obj => <div key={obj.id} style={{ fontSize: T.fs3, color: T.textDim, marginTop: 2 }}>{getObjMeta(obj).icon} {obj.description}</div>)}
@@ -387,12 +390,14 @@ export default function TasksTab({ myProfile, saveMyProfile, apiTasks, apiTrader
             if (!ac && !bc && aAny !== bAny) return aAny ? 1 : -1;
             return progressionSort(a.apiTask, b.apiTask);
           });
+          const completedFromLogs = new Set(myProfile.completedTasks || []);
           const renderCard = ({ taskId, apiTask }) => {
             const prog = myProfile.progress || {};
             const reqObjs = (apiTask.objectives || []).filter(o => !o.optional);
             const completedObjs = reqObjs.filter(obj => { const k = `${myProfile.id}-${taskId}-${obj.id}`; const meta = getObjMeta(obj); return (prog[k] || 0) >= meta.total; }).length;
             const totalObjs = reqObjs.length;
-            const isComplete = completedObjs >= totalObjs && totalObjs > 0;
+            const autoCompleted = completedFromLogs.has(taskId);
+            const isComplete = autoCompleted || (completedObjs >= totalObjs && totalObjs > 0);
             const traderName = apiTask.trader?.name || "Unknown";
             const incompleteObjs = reqObjs.filter(obj => { const k = `${myProfile.id}-${taskId}-${obj.id}`; const meta = getObjMeta(obj); return (prog[k] || 0) < meta.total; });
             return (
@@ -405,6 +410,7 @@ export default function TasksTab({ myProfile, saveMyProfile, apiTasks, apiTrader
                       {taskGroupBy !== "trader" && <Badge label={traderName} color={myProfile.color} />}
                       {taskGroupBy !== "map" && (apiTask.map ? <Badge label={apiTask.map.name} color={T.blue} /> : <Badge label="ANY MAP" color={T.cyan} />)}
                       <span style={{ fontSize: T.fs2, color: isComplete ? T.success : T.textDim }}>{completedObjs}/{totalObjs} obj</span>
+                      {autoCompleted && <span style={{ fontSize: T.fs1, color: T.cyan, letterSpacing: 0.8, background: T.cyan + "22", border: `1px solid ${T.cyan}44`, padding: "1px 5px" }}>AUTO</span>}
                     </div>
                     {!isComplete && (() => {
                       const showAll = incompleteObjs.length <= 6;
