@@ -31,15 +31,37 @@ export function useSquadRoom(myProfile) {
   const isLeader = leaderId === deviceId;
   const hasLeader = leaderId !== null;
 
-  // Push profile + preferences to room whenever they change
+  // Push profile + preferences to room whenever they change. pmcLevel,
+  // traderLevels, and raidHistory come from the log watcher / manual profile
+  // edits — including them here means squad members see each other's
+  // progression and raid history live without any extra sync plumbing.
   useEffect(() => {
     if (!supabase || !roomId || !myProfile?.name) return;
-    const profileData = { name: myProfile.name, color: myProfile.color, tasks: myProfile.tasks || [], progress: myProfile.progress || {} };
+    const profileData = {
+      name: myProfile.name,
+      color: myProfile.color,
+      tasks: myProfile.tasks || [],
+      progress: myProfile.progress || {},
+      pmcLevel: myProfile.pmcLevel ?? 1,
+      traderLevels: myProfile.traderLevels || {},
+      raidHistory: myProfile.raidHistory || [],
+      lastLogSync: myProfile.lastLogSync || null,
+    };
     supabase.from("squad_members").upsert(
       { room_id: roomId, device_id: deviceId, profile: profileData, updated_at: new Date().toISOString() },
       { onConflict: "room_id,device_id" }
     ).then(({ error: e }) => { if (e && import.meta.env.DEV) console.warn("[TG] Room profile sync failed:", e); });
-  }, [roomId, myProfile?.name, myProfile?.color, myProfile?.tasks?.length, JSON.stringify(myProfile?.progress)]);
+  }, [
+    roomId,
+    myProfile?.name,
+    myProfile?.color,
+    myProfile?.tasks?.length,
+    myProfile?.pmcLevel,
+    myProfile?.lastLogSync,
+    JSON.stringify(myProfile?.progress),
+    JSON.stringify(myProfile?.traderLevels),
+    myProfile?.raidHistory?.length,
+  ]);
 
   // Leader heartbeat: update heartbeat_at in route_config every 15s
   useEffect(() => {

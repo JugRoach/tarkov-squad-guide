@@ -1,3 +1,4 @@
+mod log_watcher;
 mod scanner;
 
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -75,6 +76,9 @@ pub fn run() {
             scanner::scan_at_cursor,
             open_scanner_popout,
             close_scanner_popout,
+            log_watcher::detect_tarkov_logs_dir,
+            log_watcher::scan_log_session,
+            log_watcher::scan_logs_dir,
         ])
         .setup(|app| {
             use tauri_plugin_global_shortcut::ShortcutState;

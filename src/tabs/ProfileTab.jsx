@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { T, PLAYER_COLORS } from '../theme.js';
 import { SL, Tip } from '../components/ui/index.js';
+import LogWatcherSection from '../components/LogWatcherSection.jsx';
 import { encodeProfile, decodeProfile } from '../lib/shareCodes.js';
 import { TRADERS, FLEA_UNLOCK_LEVEL } from '../lib/availability.js';
 import { useUpdater } from '../hooks/useUpdater.js';
@@ -269,6 +270,9 @@ export default function ProfileTab({ myProfile, saveMyProfile, setTab }) {
             })}
           </div>
         </div>
+
+        {/* ── LOG WATCHER ── */}
+        <LogWatcherSection myProfile={myProfile} saveMyProfile={saveMyProfile} />
 
         {/* ── SHARE CODE ── */}
         <SL c={<>YOUR SHARE CODE<Tip text="Copy this code and paste it in Discord before each raid. Your squadmates paste it in the Raid tab to import your profile and tasks." /></>} />
