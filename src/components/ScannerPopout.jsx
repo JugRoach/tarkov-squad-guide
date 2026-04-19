@@ -153,7 +153,7 @@ export default function ScannerPopout() {
             </div>
 
             {/* Per-slot — the decision metric, big and colored */}
-            <div style={{ display: "flex", alignItems: "baseline", gap: 5, marginBottom: 2 }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 5, marginBottom: 4 }}>
               <span style={{ fontSize: T.fs1, color: T.textDim, letterSpacing: 0.5 }}>PER/SLOT</span>
               <span style={{
                 fontSize: T.fs4,
@@ -164,33 +164,56 @@ export default function ScannerPopout() {
                 {perSlot ? formatPrice(perSlot) : "\u2014"}
               </span>
               <span style={{ fontSize: T.fs1, color: T.textDim }}>({slots}s)</span>
-              {bestSource && (
-                <span style={{ fontSize: T.fs1, color: T.gold, marginLeft: "auto" }}>via {bestSource}</span>
-              )}
             </div>
 
-            {/* Always show BOTH flea and best-trader values side by side so
-                the player can see the full picture, even when one source is
-                clearly the winner — the Per/slot number above already flags
-                which one drives the pickup decision. */}
-            <div style={{ display: "flex", gap: 8, fontSize: T.fs1, marginTop: 3 }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <span style={{ color: T.textDim }}>Flea </span>
-                <span style={{ color: fleaPrice ? T.textBright : T.textDim }}>{formatPrice(fleaPrice)}</span>
-                {change != null && change !== 0 && (
-                  <span style={{ color: change > 0 ? T.success : T.error, marginLeft: 3 }}>
-                    {change > 0 ? "+" : ""}{Math.round(change)}%
+            {/* Both prices stacked on the left; right side calls out which
+                source wins so the pickup decision is a one-glance read. */}
+            <div style={{ display: "flex", alignItems: "stretch", gap: 8, fontSize: T.fs1 }}>
+              <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+                <div style={{
+                  fontWeight: bestSource === "Flea" ? "bold" : "normal",
+                  color: bestSource === "Flea" ? T.gold : undefined,
+                }}>
+                  <span style={{ color: T.textDim }}>Flea </span>
+                  <span style={{ color: fleaPrice ? T.textBright : T.textDim }}>{formatPrice(fleaPrice)}</span>
+                  {change != null && change !== 0 && (
+                    <span style={{ color: change > 0 ? T.success : T.error, marginLeft: 3 }}>
+                      {change > 0 ? "+" : ""}{Math.round(change)}%
+                    </span>
+                  )}
+                </div>
+                <div style={{
+                  fontWeight: bestSource && bestSource !== "Flea" ? "bold" : "normal",
+                  color: bestSource && bestSource !== "Flea" ? T.gold : undefined,
+                }}>
+                  <span style={{ color: T.textDim }}>
+                    {bestSell?.vendor?.name || "Trader"}{" "}
                   </span>
-                )}
+                  <span style={{ color: bestSell ? T.textBright : T.textDim }}>
+                    {bestSell ? formatPrice(bestSell.priceRUB) : "\u2014"}
+                  </span>
+                </div>
               </div>
-              <div style={{ flex: 1, minWidth: 0, textAlign: "right" }}>
-                <span style={{ color: T.textDim }}>
-                  {bestSell?.vendor?.name || "Trader"}{" "}
-                </span>
-                <span style={{ color: bestSell ? T.textBright : T.textDim }}>
-                  {bestSell ? formatPrice(bestSell.priceRUB) : "\u2014"}
-                </span>
-              </div>
+              {bestSource && (
+                <div style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  paddingLeft: 8,
+                  borderLeft: `1px solid ${T.border}`,
+                  color: T.gold,
+                  textAlign: "center",
+                  lineHeight: 1.15,
+                  flexShrink: 0,
+                }}>
+                  <div>
+                    <div style={{ fontSize: 9, color: T.textDim, letterSpacing: 0.5 }}>SELL</div>
+                    <div style={{ fontSize: T.fs2, fontWeight: "bold" }}>
+                      {bestSource === "Flea" ? "FLEA" : (bestSell?.vendor?.name || "TRADER").toUpperCase()}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         ) : (

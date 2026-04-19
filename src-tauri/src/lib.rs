@@ -34,8 +34,8 @@ fn open_scanner_popout_on_main(app: &tauri::AppHandle) {
     }
     let _ = WebviewWindowBuilder::new(app, "scanner-popout", WebviewUrl::App("index.html?window=scanner-popout".into()))
         .title("Scanner")
-        .inner_size(320.0, 140.0)
-        .min_inner_size(240.0, 100.0)
+        .inner_size(340.0, 170.0)
+        .min_inner_size(260.0, 130.0)
         .always_on_top(true)
         .resizable(true)
         .decorations(true)
