@@ -1,6 +1,6 @@
 [package]
 name = "tarkov-guide"
-version = "0.7.2"
+version = "0.7.3"
 description = "Tarkov PvE Squad Guide — Desktop Overlay"
 authors = ["Matt"]
 edition = "2021"
