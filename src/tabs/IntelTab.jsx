@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { T } from '../theme.js';
 import { SL, Badge, Btn, Tip } from '../components/ui/index.js';
 import { EMAPS } from '../lib/mapData.js';
@@ -12,6 +12,11 @@ export default function IntelTab() {
   const [sv, setSv] = useState("extracts");
   const [apiKeys, setApiKeys] = useState([]);
   const [keysLoading, setKeysLoading] = useState(false);
+  const keysSectionRefs = useRef({});
+  const scrollToMapKeys = (mapId) => {
+    const el = keysSectionRefs.current[mapId];
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
   useEffect(() => {
     if (sv !== "keys" || apiKeys.length > 0) return;
     setKeysLoading(true);
@@ -54,6 +59,24 @@ export default function IntelTab() {
           ))}
         </>}
         {sv === "keys" && <>
+          {!keysLoading && (() => {
+            const mapsWithKeys = EMAPS.filter(map => {
+              const extractKeys = [...map.pmcExtracts, ...map.scavExtracts].filter(e => e.type === "key");
+              const mapApiKeys = apiKeys.filter(k => categorizeKey(k.name).includes(map.id));
+              return extractKeys.length + mapApiKeys.length > 0;
+            });
+            if (mapsWithKeys.length === 0) return null;
+            return (
+              <div style={{ position: "sticky", top: -14, zIndex: 2, background: T.bg, paddingTop: 4, paddingBottom: 8, marginBottom: 10, marginTop: -4, borderBottom: `1px solid ${T.border}` }}>
+                <div style={{ fontSize: T.fs1, color: T.textDim, letterSpacing: 1, marginBottom: 5, display: "flex", alignItems: "center", gap: 4 }}>JUMP TO MAP<Tip text="Click a map to jump to its keys. All maps stay rendered below — scroll freely or jump with a click." /></div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(100px, 1fr))", gap: 4 }}>
+                  {mapsWithKeys.map(m => (
+                    <button key={m.id} onClick={() => scrollToMapKeys(m.id)} style={{ background: "transparent", border: `2px solid ${T.border}`, color: T.textDim, padding: "5px 4px", fontSize: T.fs2, cursor: "pointer", fontFamily: T.sans, textTransform: "uppercase", textAlign: "center", wordBreak: "break-word" }}>{m.name}</button>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
           <div style={{ background: T.orangeBg, border: `1px solid ${ET_CONFIG.key.border}`, borderLeft: `2px solid ${ET_CONFIG.key.color}`, padding: "10px 12px", marginBottom: 14, fontSize: T.fs2, color: ET_CONFIG.key.color, lineHeight: 1.7 }}>
             <Tip text="All keys in the game, organized by map. Data pulled live from tarkov.dev. Extract keys are highlighted — these unlock extractions, not just loot rooms. Tap a map header to jump to its extract list." />
             ⚿ Every key organized by map — pulled live from tarkov.dev. Extract keys highlighted separately.
@@ -66,7 +89,7 @@ export default function IntelTab() {
             const totalCount = uniqueExtractKeys.length + mapApiKeys.length;
             if (totalCount === 0) return null;
             return (
-              <div key={map.id} style={{ marginBottom: 16 }}>
+              <div key={map.id} ref={el => { keysSectionRefs.current[map.id] = el; }} style={{ marginBottom: 16, scrollMarginTop: 70 }}>
                 <div onClick={() => { setSel(map); setSv("extracts"); setFil("key"); }} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", borderBottom: `1px solid ${map.color}33`, paddingBottom: 6, marginBottom: 8 }}>
                   <div style={{ color: map.color, fontSize: T.fs3, fontWeight: "bold", letterSpacing: 1 }}>{map.name.toUpperCase()}</div>
                   <div style={{ fontSize: T.fs1, color: T.textDim }}>{totalCount} key{totalCount !== 1 ? "s" : ""} →</div>

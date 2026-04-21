@@ -5,13 +5,14 @@ import { getObjMeta, progressKey, getAllPrereqTaskIds } from '../lib/utils.js';
 import { markTaskCompleteInProgress, cleanOrphanedPrereqProgress, computeTaskDepths, getAvailableTasks } from '../lib/taskUtils.js';
 import { traderSort } from '../constants.js';
 import { useStorage } from '../hooks/useStorage.js';
+import { useDebouncedCallback } from '../hooks/useDebounce.js';
 
 export default function TasksTab({ myProfile, saveMyProfile, apiTasks, apiTraders, loading, apiError, apiHideout, hideoutLevels, saveHideoutLevels, hideoutTarget, saveHideoutTarget, onRouteTask }) {
   const [profileSub, setProfileSub] = useState("tasks"); // "tasks" | "browse" | "hideout" | "chains"
   const [chainTrader, setChainTrader] = useState("all");
   const [expandedChainNodes, setExpandedChainNodes] = useState(new Set());
   const [taskSearch, setTaskSearch] = useState("");
-  const taskSearchDebounce = useRef(null);
+  const { schedule: scheduleTaskSearch } = useDebouncedCallback(200);
   const [taskSearchDeferred, setTaskSearchDeferred] = useState("");
   const [taskTrader, setTaskTrader] = useState("all");
   const [taskMapFilter, setTaskMapFilter] = useState("all");
@@ -226,7 +227,7 @@ export default function TasksTab({ myProfile, saveMyProfile, apiTasks, apiTrader
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
               <div style={{ fontSize: T.fs2, color: T.textDim, fontFamily: T.sans }}>{myProfile.tasks?.length || 0} selected</div>
             </div>
-            <input aria-label="Search tasks" value={taskSearch} onChange={e => { setTaskSearch(e.target.value); clearTimeout(taskSearchDebounce.current); taskSearchDebounce.current = setTimeout(() => setTaskSearchDeferred(e.target.value), 200); }} placeholder="Search tasks..." style={{ width: "100%", background: T.inputBg, border: `1px solid ${T.borderBright}`, color: T.textBright, padding: "7px 10px", fontSize: T.fs2, fontFamily: T.sans, outline: "none", boxSizing: "border-box", marginBottom: 8 }} />
+            <input aria-label="Search tasks" value={taskSearch} onChange={e => { const val = e.target.value; setTaskSearch(val); scheduleTaskSearch(() => setTaskSearchDeferred(val)); }} placeholder="Search tasks..." style={{ width: "100%", background: T.inputBg, border: `1px solid ${T.borderBright}`, color: T.textBright, padding: "7px 10px", fontSize: T.fs2, fontFamily: T.sans, outline: "none", boxSizing: "border-box", marginBottom: 8 }} />
             <div style={{ fontSize: T.fs2, color: T.textDim, letterSpacing: 1.5, marginBottom: 6, fontFamily: T.sans }}>TRADERS<Tip text="Tap a trader to see their tasks. Use 'ADD ALL' to grab every task from that trader, or add them one by one." /></div>
             <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
               <button onClick={() => setTaskTrader("all")} style={{

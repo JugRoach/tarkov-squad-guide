@@ -54,19 +54,9 @@ async fn open_scanner_popout(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-fn close_scanner_popout(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("scanner-popout") {
-        w.close().map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -77,9 +67,7 @@ pub fn run() {
             scanner::capture_rgba_at_cursor,
             scanner::ocr_tooltip_region,
             open_scanner_popout,
-            close_scanner_popout,
             log_watcher::detect_tarkov_logs_dir,
-            log_watcher::scan_log_session,
             log_watcher::scan_logs_dir,
         ])
         .setup(|app| {

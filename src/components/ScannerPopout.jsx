@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { T } from "../theme.js";
 import { useScanAndFetch } from "../hooks/useScanAndFetch.js";
 import { useIconIndex } from "../hooks/useIconIndex.js";
+import { DEFAULT_SCANNER_THRESHOLD } from "../constants.js";
 
 const FLEA_UNLOCK_LEVEL = 15;
 
@@ -15,14 +16,14 @@ function formatPrice(price) {
 // scanner popout can honor the user's pickup threshold + PMC level without
 // a prop drill (the popout lives in a separate Tauri webview).
 function useProfileSettings() {
-  const [settings, setSettings] = useState({ threshold: 20000, pmcLevel: 1 });
+  const [settings, setSettings] = useState({ threshold: DEFAULT_SCANNER_THRESHOLD, pmcLevel: 1 });
   useEffect(() => {
     const refresh = () => {
       try {
         const raw = localStorage.getItem("tg-myprofile-v3");
         if (!raw) return;
         const p = JSON.parse(raw);
-        const threshold = typeof p?.scannerThreshold === "number" ? p.scannerThreshold : 20000;
+        const threshold = typeof p?.scannerThreshold === "number" ? p.scannerThreshold : DEFAULT_SCANNER_THRESHOLD;
         const pmcLevel = typeof p?.pmcLevel === "number" ? p.pmcLevel : 1;
         setSettings({ threshold, pmcLevel });
       } catch (_) {}

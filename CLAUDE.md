@@ -1,149 +1,192 @@
-# Tarkov PvE Squad Guide — Claude Code Context
+# Tarkov Planner — Claude Code Context
 
-## Project Overview
+Tactical Escape from Tarkov PvE companion: task tracker, route planner,
+build optimizer, in-game hover-scan, squad coordination. Desktop-first
+(Tauri + WebView2), with a hosted web fallback that will be repurposed as
+a marketing landing page.
 
-A mobile-first progressive web app (PWA) built as a React single-file component. This is a tactical reference tool for Escape from Tarkov PvE players. It is currently built and iterated entirely as a Claude.ai artifact (React JSX), and this handoff is to continue development in Claude Code.
-
-**Current version: v7**
-**Source file:** `TarkovGuide.jsx` (single file, all components inline)
-
----
-
-## What This App Does
-
-A "one stop shop" field reference for Tarkov PvE that a player should be able to pull up in the time it takes for a map to load in-game. Key features:
-
-1. **Tasks tab** — Browse, add, and manage your active quests. Sub-tabs: My Tasks, Browse, Trees (prerequisite chains), and Hideout tracking. Tasks are sourced live from the tarkov.dev GraphQL API.
-
-2. **Raid tab** — Plan and execute raids (solo or squad). Import teammate codes, select map, pick tasks and extracts, generate optimized route, and track post-raid progress.
-
-3. **Intel tab** — All reference material in one place. Sub-tabs: Extracts (per map, PMC/Scav), Keys (key guide by map), Maps (external links to tarkov.dev/Mapgenie/wiki), and Progression (tier-based map roadmap).
-
-4. **Profile tab** — Lightweight identity and settings. Name/color editor, share code copy/restore, and PWA install instructions.
-
-5. **Route Generation** — Nearest-neighbor optimization from spawn point through all players' priority task objectives, then appends extract as last stop. Rendered on the real tarkov.dev SVG map image with numbered gold waypoints and a green ⬆ extract marker.
-
-6. **Post-Raid Tracker** — After a raid, each player logs their own progress (kills completed, items found). Updates their profile's progress object, which is included in their next share code.
-
-7. **Persistent Storage** — Uses `window.storage` (Claude artifact built-in key-value store). On export to a real PWA/website, swap for `localStorage` or a backend.
+**Repo root**: `tarkov-guide/` (directory name, pre-rename)
+**Package name**: `tarkov-planner` (display name `Tarkov Planner`)
+**Rust crate**: `tarkov-guide` / `tarkov_guide_lib` (internal, unchanged
+to avoid touching the `.cargo/config.toml` target-dir path)
+**Tauri bundle identifier**: `com.tarkovguide.desktop` — do NOT change, it
+anchors the updater signing chain for existing installs.
 
 ---
 
-## Architecture Decisions (Don't Re-Litigate These)
+## Architecture
 
-- **Single JSX file** — All components are in one file by design. This was intentional for the artifact environment. When building out, it's fine to split into components.
-- **No backend** — Deliberately chosen. Cross-device sync is handled by share codes (base64 encoded profile). If a backend is added later, Supabase was discussed as the preference.
-- **PvE only** — Co-op extracts are permanently disabled/grayed. No PvP considerations.
-- **tarkov.dev API** — Live GraphQL API at `https://api.tarkov.dev/graphql`. Used for both task data and SVG map images. This is the canonical data source — do not hardcode task data.
-- **Max squad size: 5** — Confirmed from official Tarkov wiki. Hard-coded as `MAX_SQUAD = 5`.
-- **Share code format** — `TG2:` prefix + base64(JSON). JSON payload: `{v:2, n:name, c:color, t:tasks[], pr:progress{}}`. Don't change this without a migration path.
-- **Route algorithm** — Nearest-neighbor from spawn origin `{x:0.5, y:0.85}` through objective waypoints, with extract appended last (not included in NN optimization).
+Vite + React (hooks only, no external UI kit) with a Tauri (Rust) shell
+for desktop. Same React build serves both the web PWA and the Tauri
+webview; runtime branches on `window.__TAURI_INTERNALS__`.
 
----
+### Top-level source layout (`src/`)
+- `main.jsx` — entry, branches between `DesktopApp` (Tauri) and the web
+  app. Also hosts the `scanner-popout` secondary-webview entrypoint.
+- `DesktopApp.jsx` — primary Tauri window; tab routing, global search,
+  updater banner, overlay toggle.
+- `api.js` — tarkov.dev GraphQL client + query strings.
+- `constants.js` — shared timings, codes, default scanner threshold.
+- `theme.js` — design tokens (`T`), player colors, spacing scale.
+- `supabase.js` — Supabase client for squad-room realtime.
+- `tabs/` — one file per primary tab: Tasks, Raid, Builds, Intel, Profile.
+- `components/` — reusable pieces (ScannerPopout, OverlayControls,
+  MapOverlay, LogWatcherSection, PriceSearch, etc.).
+- `hooks/` — `useStorage`, `useSquadRoom`, `useIconIndex`,
+  `useScanAndFetch`, `useUpdater`, `useDebounce`, `useCopyToClipboard`.
+- `lib/` — pure data helpers: `shareCodes`, `taskUtils`, `mapData`,
+  `configData`, `buildOptimizer`, `buildStats`, `availability`,
+  `fuzzyMatch`, `iconHash`, `tauri` (lazy loader).
 
-## Data Sources
+### Rust side (`src-tauri/src/`)
+- `lib.rs` — plugin registration, invoke handlers, global shortcuts
+  (Alt+T/O/S/P), scanner-popout window management.
+- `scanner.rs` — screen capture at cursor, Windows OCR, tooltip-region
+  OCR, RGBA capture for dHash.
+- `log_watcher.rs` — resolves Tarkov's `build/Logs` dir, parses
+  `application_*.log` + `push-notifications_*.log` for raid and task
+  events.
 
-### tarkov.dev GraphQL API
-- Endpoint: `https://api.tarkov.dev/graphql`
-- Used for: map SVG images, coordinate spaces, all task/objective data
-- Map images: `map.svg.url` — these are SVG files hosted on tarkov.dev CDN
-- Task objective positions: world-space coordinates transformed to 0-1 normalized via `worldToPct(pos, bounds)` using `coordinateSpace {bottom, left, top, right}`
-- **Important**: Not all objectives have coordinate data. Kill objectives (`type: "shoot"`) and item-find objectives rarely have positions. Location/mark/questItem objectives usually do.
+### Tauri plugins in use
+`tauri-plugin-global-shortcut`, `tauri-plugin-updater`,
+`tauri-plugin-process`. The `shell` and `dialog` plugins were removed as
+unused. `tauri_plugin_process` is load-bearing — `useUpdater.js`
+imports `relaunch` from it.
 
-### Hardcoded Data (EMAPS array)
-The `EMAPS` array in the source contains hardcoded extract data for all 9 maps because the tarkov.dev API does not expose extract positions. Each extract has:
-- `name`, `type` (open/key/pay/coop/special/timed), `note` (description)
-- `pct: {x, y}` — approximate normalized position on the map SVG (0-1 scale). These are best-effort approximations, not exact.
-- `requireItems: string[]` — items shown in the item-check prompt
-
----
-
-## Current State of Each Feature
-
-| Feature | Status | Notes |
-|---|---|---|
-| Profile (name, color) | ✅ Complete | Profile tab |
-| Task browser (live from tarkov.dev) | ✅ Complete | Tasks tab → Browse sub-tab |
-| Share codes | ✅ Complete | TG2: format, in Profile tab |
-| Squad import | ✅ Complete | Raid tab |
-| Map selection (tarkov.dev API) | ✅ Complete | 9 maps |
-| Faction toggle (PMC/Scav) | ✅ Complete | |
-| Priority task selection per player | ✅ Complete | |
-| Extract selection | ✅ Complete | All 9 maps, item checks |
-| Route generation | ✅ Complete | NN algorithm, extract as final waypoint |
-| Map overlay with route | ✅ Complete | SVG overlay on tarkov.dev map image |
-| Conflict resolution (overlapping kill objectives) | ✅ Complete | Merge or separate |
-| Post-raid progress tracker | ✅ Complete | |
-| Persistent storage | ✅ Complete | window.storage (swap to localStorage for PWA) |
-| PWA install instructions | ✅ Complete | Profile tab |
-| Progression guide | ✅ Complete | Intel tab → Progression sub-view |
-| Extracts reference | ✅ Complete | Intel tab, all maps, PMC + Scav |
+### Capabilities
+See `src-tauri/capabilities/default.json`. Scoped to `main` and
+`scanner-popout` windows. Only permissions actually exercised at runtime
+are declared — don't add capabilities speculatively.
 
 ---
 
-## Known Limitations / Next Steps
+## Frontend data flow
 
-1. **Extract positions are approximate** — The `pct` values in EMAPS were manually estimated. A future improvement would be to cross-reference exact positions from community data (e.g., tarkov.dev's own extract markers if they expose them via API).
+- **tarkov.dev GraphQL** (`https://api.tarkov.dev/graphql`) is the
+  canonical source for tasks, maps, items, traders, weapons, hideout.
+  Do not hardcode this data — re-fetch on load, cache in state.
+- **Map SVGs**: `map.svg.url` from tarkov.dev CDN.
+- **Coordinates**: task objectives come in world-space. Convert with
+  `worldToPct(pos, bounds)` using `coordinateSpace` from the API.
+  Kill (`shoot`) and findItem objectives usually lack coordinates.
+- **Extract positions**: hand-maintained in `lib/mapData.js` (`EMAPS`) —
+  the API doesn't expose them.
 
-2. **window.storage → localStorage** — When deploying as a real PWA outside the Claude artifact environment, replace all `window.storage.get/set` calls with `localStorage.getItem/setItem`. The key names can stay the same.
+### Local persistence
+`localStorage` via `useStorage` hook. Key names are versioned
+(e.g. `tg-myprofile-v3`, `tg-squad-v3`, `tg-builds-v1`). Do not reuse
+an old key for a new shape.
 
-3. **Quest tracker (early game Prapor/Therapist)** — In earlier versions there was a separate Quests tab with hardcoded early-game quest guides (Debut, Shootout Picnic, Delivery from the Past, etc.). This was removed in favor of the live tarkov.dev task browser. If re-adding, the quest detail view should include: objectives checklist, field notes, Mapgenie hint, reward info, and links to Mapgenie + wiki.
+### Share codes
+`TG2:` prefix + base64(JSON) for profiles, `TGB:` for builds. Canonical
+implementation: `src/lib/shareCodes.js`. Tests: `src/lib/utils.test.js`.
 
-4. **More traders** — Currently all traders are browsable but only tasks for the current map are shown in the priority task selector. Could expand to show all active tasks across all maps.
-
-5. **Route planner for non-API-positioned tasks** — Kill objectives don't have coordinates from the API. A future enhancement would be hardcoded "zone" positions for common kill objective areas (e.g., "Kill Scavs on Customs" → gas station / dorms / construction zones as selectable locations).
-
-6. **Supabase backend** — If real-time sync is desired later, Supabase free tier was the agreed-upon choice. Would add: user accounts (or anonymous device IDs), cloud-synced profiles, squad rooms with live join codes. Share codes would still exist as fallback.
-
-7. **React Native / Electron** — The PWA approach was chosen for immediate cross-platform availability. If a native app is wanted later, the component logic ports cleanly to React Native. Electron was also discussed for desktop.
-
----
-
-## Player Colors
-
-```js
-const PLAYER_COLORS = ["#c8a84b","#5a9aba","#9a5aba","#5aba8a","#ba7a5a"];
-```
-Player 1 (you) defaults to gold. Imported players cycle through the rest.
-
----
-
-## Tech Stack
-
-- React (hooks only — useState, useEffect, useCallback)
-- No external libraries (no Tailwind, no UI kit, no routing)
-- Inline styles throughout (intentional for single-file portability)
-- Fonts: `'Courier New', Consolas, monospace` — military terminal aesthetic
-- Color theme: dark background `#07090b`, surface `#0d1117`, gold accent `#c8a84b`
+### Squad rooms (Supabase realtime)
+`useSquadRoom` hook. Profiles live in `squad_members.profile` as a JSON
+column with shape `{name, color, tasks, progress, pmcLevel,
+traderLevels, ...}`. Post-raid tracker and the planned log watcher both
+write into the same `progress` object.
 
 ---
 
-## PWA Deployment
+## Desktop surface
 
-To deploy as a real installable PWA:
+### Scanner pipeline (`useScanAndFetch` + `scanner.rs`)
+1. `scan_at_cursor` grabs a 220×130 region around the cursor and runs
+   Windows Media OCR on it.
+2. `capture_rgba_at_cursor` returns raw RGBA for the 80×80 tile under the
+   cursor (used by dHash).
+3. Frontend tone-maps the tile (HDR stretch via `iconHash.js`), computes
+   a 256-bit difference hash, compares against all ~4800 tarkov.dev icon
+   hashes from `useIconIndex`.
+4. **Combined scoring** (OCR fuzzy score + dHash score, additive) picks
+   the best item every frame.
+5. Every ~4th scan, `ocr_tooltip_region` captures a larger 420×320
+   region below cursor and verifies via token-bag-subset + shortName
+   agreement filters.
 
-1. Create a Vite or CRA project
-2. Drop `TarkovGuide.jsx` into `src/`
-3. Replace `window.storage` calls with `localStorage`
-4. Add `manifest.json` with app name, icons, `display: "standalone"`
-5. Add a service worker (Vite PWA plugin handles this automatically)
-6. Host on Vercel, Netlify, or GitHub Pages
+### Secondary webview
+`scanner-popout` is a separate Tauri webview (`?window=scanner-popout`
+query param). Profile settings sync via `storage` events on
+`tg-myprofile-v3`. See known quirks below.
 
-The app is fully self-contained — no env vars, no API keys, no auth.
+### Global hotkeys
+Registered in `lib.rs::run()`:
+- **Alt+T** — toggle main window
+- **Alt+O** — toggle overlay mode (emits `toggle-overlay` event)
+- **Alt+S** — toggle auto-scan (fan-out to main + popout)
+- **Alt+P** — toggle scanner popout
+
+### Log watcher (`log_watcher.rs`)
+One-shot parser (Phase A). Tails `build/Logs/<session>/*.log` files
+looking for `application_*` (raid start/end, profile select, session
+mode) and `push-notifications_*` (chat-message task
+started/failed/finished via MessageType codes 10/11/12). Live watch via
+the `notify` crate is the next phase.
+
+### Auto-updater
+GitHub Releases. Endpoint in `tauri.conf.json` points at `latest.json`
+on the `JugRoach/tarkov-planner` repo. Release pipeline is
+`.github/workflows/release.yml`, tag-triggered on `v*`.
 
 ---
 
-## Conversation History Summary
+## Scripts (`package.json`)
+- `dev` — Vite dev server (web)
+- `build` — Vite production build → `dist/`
+- `preview` — Vite preview of built bundle
+- `desktop` — `tauri dev` (runs Vite + Tauri together)
+- `desktop:build` — `tauri build` (produces installer)
+- `test` / `test:watch` — Vitest (ESLint v9 flat config)
+- `lint` — `eslint src/`
 
-This project was built iteratively across a long Claude.ai conversation:
-- Started as a map progression roadmap + extract viewer
-- Added PvE framing (co-op extracts disabled, boss info)
-- Added quest tracker with hardcoded early-game quests
-- Rebuilt with live tarkov.dev API for real map images and task data
-- Added 5-player squad system with per-player profiles
-- Added share codes for squad coordination without a backend
-- Added extract selection with item-check prompts
-- Extract integrated as forced final route waypoint
-- PWA install instructions added for all platforms
+---
 
-The user (Matt) is an Air Force training manager and active gamer. He plays Tarkov PvE with a group of friends. He is technically capable and uses Claude Code regularly. He prefers concrete, working implementations over abstract explanations.
+## Release procedure
+
+**Always bump version BEFORE tagging.** CI builds the installer from the
+version numbers in the tree at the tagged commit, not from the tag name.
+
+1. Bump version in all four places:
+   - `package.json` (`version`)
+   - `src-tauri/tauri.conf.json` (`version`)
+   - `src-tauri/Cargo.toml` (`[package] version`)
+   - `src-tauri/Cargo.lock` (run `cargo check` to refresh)
+2. Commit: `release: v0.X.Y`
+3. `git tag v0.X.Y && git push --tags`
+4. CI in `.github/workflows/release.yml` produces `latest.json` + the
+   MSI/NSIS installers + the updater `.sig` file.
+
+---
+
+## Known quirks
+
+- **WebView2 cache** (`%LOCALAPPDATA%\com.tarkovguide.desktop\EBWebView`)
+  can serve stale JS after a Tauri rebuild even though the dev URL
+  reloads. Clear it if UI changes aren't showing up.
+- **Vite HMR does not reach secondary webviews.** After editing JSX
+  that's rendered in the scanner popout, close and reopen the popout
+  (Alt+P twice) — the main window HMRs fine, the popout has to reload.
+- **Tauri sync commands that create webviews deadlock.** Anything that
+  calls `WebviewWindowBuilder::build()` must be `async` and dispatched
+  with `app.run_on_main_thread(...)`. See `open_scanner_popout` for the
+  pattern.
+- **Windows HDR breaks pixel-value matching.** Screen captures come
+  through with compressed dynamic range under Windows HDR on the
+  Odyssey G9. `iconHash.js::toneMapRgba` does a 5–95 percentile luminance
+  stretch before hashing. Don't skip this step.
+- **`set_decorations(false)` breaks mouse events** on Windows. Frameless
+  windows are off the table — use `decorations: true` always.
+- **Scanner 80×80 tile crop is fixed-size.** Works on the Odyssey G9 at
+  native Tarkov UI scale. Very different UI scales may need tuning.
+
+---
+
+## What NOT to touch
+- Share-code format (`TG2:` / `TGB:`) — there's no migration path; it's
+  in the wild.
+- The Tauri bundle identifier (`com.tarkovguide.desktop`) — changing it
+  invalidates the updater signing chain for existing installs.
+- `tauri_plugin_process` — looks unused but `useUpdater.js` needs it.
+- `EMAPS` extract positions — hand-tuned against each map SVG; don't
+  auto-regenerate without a visual diff.

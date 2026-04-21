@@ -103,12 +103,27 @@ pub fn capture_rgba_at_cursor() -> Result<serde_json::Value, String> {
     // Same capture region as scan_at_cursor — keeps both paths seeing
     // the same pixels.
     let cap = capture_region_around_cursor(220, 130)?;
+    // Run tile detection so the JS side can crop dHash to the actual
+    // tile rect (matches multi-slot item aspect ratios correctly)
+    // rather than a fixed 80px square centered on the cursor.
+    let tile = detect_highlighted_tile(
+        &cap.rgba,
+        cap.width,
+        cap.height,
+        cap.cursor_x_in_capture,
+        cap.cursor_y_in_capture,
+    );
+    let tile_json = match tile {
+        Some(r) => serde_json::json!({"x": r.x, "y": r.y, "w": r.w, "h": r.h}),
+        None => serde_json::Value::Null,
+    };
     Ok(serde_json::json!({
         "rgba": cap.rgba,
         "width": cap.width,
         "height": cap.height,
         "cursorX": cap.cursor_x_in_capture,
         "cursorY": cap.cursor_y_in_capture,
+        "tile": tile_json,
     }))
 }
 
@@ -118,6 +133,12 @@ pub fn capture_rgba_at_cursor() -> Result<serde_json::Value, String> {
 /// item names like "Aseptic bandage" against each line. Intended to run on
 /// a slower cadence (~1 Hz) alongside the fast scan to confirm or correct
 /// its picks once the tooltip has had time to appear.
+///
+/// Tile-anchored: after capture, detects the highlighted inventory tile and
+/// masks it (plus everything above-left of the cursor) to black before OCR.
+/// This prevents neighboring-tile labels and the hovered tile's own
+/// shortName from leaking into the OCR lines, which was causing adjacent
+/// item names to spuriously "verify" the wrong candidate.
 #[tauri::command]
 pub fn ocr_tooltip_region() -> Result<Vec<String>, String> {
     let region_w: u32 = 420;
@@ -127,12 +148,212 @@ pub fn ocr_tooltip_region() -> Result<Vec<String>, String> {
     // inside the capture rectangle.
     let cap = capture_region_around_cursor_biased(region_w, region_h, 1, 4)?;
 
+    // If the cursor isn't on a tile, the tooltip isn't up — don't pay for
+    // OCR. This both saves CPU and prevents stray UI text from being fed
+    // to the verify pass.
+    let tile = detect_highlighted_tile(
+        &cap.rgba,
+        cap.width,
+        cap.height,
+        cap.cursor_x_in_capture,
+        cap.cursor_y_in_capture,
+    );
+    if tile.is_none() {
+        return Ok(Vec::new());
+    }
+    let tile = tile.unwrap();
+
+    // Mask out the tile itself — its shortName label would otherwise
+    // match single-word items like "Lamp" and pre-empt the tooltip's full
+    // name. We deliberately do NOT mask above/left of the cursor, since
+    // Tarkov flips tooltip direction near screen edges (up-left from
+    // bottom-right corner, etc.). The JS-side token-bag subset +
+    // shortName-agreement filters already catch neighboring-tile leakage.
+    let mut masked = cap.rgba.clone();
+    mask_region_to_black(&mut masked, cap.width, cap.height, tile.x, tile.y, tile.w, tile.h);
+
     const SCALE: u32 = 3;
-    let (processed, pw, ph) = preprocess(&cap.rgba, cap.width, cap.height, SCALE);
+    let (processed, pw, ph) = preprocess(&masked, cap.width, cap.height, SCALE);
     debug_dump_rgba("tooltip", &processed, pw, ph);
 
     let lines = ocr_lines(&processed, pw, ph).map_err(|e| format!("OCR failed: {e}"))?;
     Ok(lines)
+}
+
+/// Zero out the alpha and RGB bytes inside a rect. Used to hide the
+/// hovered tile + above-left quadrant from the tooltip OCR pass.
+fn mask_region_to_black(rgba: &mut [u8], width: u32, height: u32, rx: u32, ry: u32, rw: u32, rh: u32) {
+    let x0 = rx.min(width);
+    let y0 = ry.min(height);
+    let x1 = (rx + rw).min(width);
+    let y1 = (ry + rh).min(height);
+    for y in y0..y1 {
+        let row_start = (y * width + x0) as usize * 4;
+        let row_end = (y * width + x1) as usize * 4;
+        for b in &mut rgba[row_start..row_end] {
+            *b = 0;
+        }
+    }
+}
+
+
+#[derive(Clone, Copy, Debug)]
+struct TileRect {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+/// "Is the cursor actually on an inventory tile, and if so, where?". Two-stage:
+///   1. Fast patch-luminance gate — rejects cursor-over-empty-space before
+///      paying for the ray cast. Percentile-based so HDR doesn't break it
+///      (compares patch against the capture's own darkness floor, not a
+///      fixed luma value that shifts with display gamma).
+///   2. Ray-cast from the cursor in four cardinal directions, stopping when
+///      luminance drops below the darkness floor for 4 consecutive pixels
+///      (the tile-to-tile gap). The four stops frame the tile's bounds.
+///
+/// Returned rect is in capture-pixel coords and slightly padded so the crop
+/// includes the tile's darker border pixels, matching the framing of the
+/// tarkov.dev reference icons that dHash compares against.
+fn detect_highlighted_tile(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    cursor_x: i32,
+    cursor_y: i32,
+) -> Option<TileRect> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let src_len = (width * height) as usize;
+    if rgba.len() < src_len * 4 {
+        return None;
+    }
+    let w = width as i32;
+    let h = height as i32;
+    if cursor_x < 0 || cursor_y < 0 || cursor_x >= w || cursor_y >= h {
+        return None;
+    }
+
+    // --- 5th-percentile luminance = darkness floor (inventory background).
+    let mut hist = [0u32; 256];
+    for i in 0..src_len {
+        let idx = i * 4;
+        let r = rgba[idx] as u32;
+        let g = rgba[idx + 1] as u32;
+        let b = rgba[idx + 2] as u32;
+        let lum = (r * 299 + g * 587 + b * 114) / 1000;
+        hist[lum as usize] += 1;
+    }
+    let lo_target = src_len as u32 / 20;
+    let mut lo: u32 = 0;
+    let mut acc: u32 = 0;
+    for (v, &count) in hist.iter().enumerate() {
+        acc += count;
+        if acc >= lo_target {
+            lo = v as u32;
+            break;
+        }
+    }
+
+    // --- Patch gate: 21×21 around cursor. Big enough to survive cursor-near-
+    // edge positioning inside a tile; small enough to stay within one tile.
+    const RADIUS: i32 = 10;
+    let x0 = (cursor_x - RADIUS).max(0) as u32;
+    let y0 = (cursor_y - RADIUS).max(0) as u32;
+    let x1 = (cursor_x + RADIUS).min(w - 1) as u32;
+    let y1 = (cursor_y + RADIUS).min(h - 1) as u32;
+    let mut sum: u32 = 0;
+    let mut count: u32 = 0;
+    let mut max_lum: u32 = 0;
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let idx = ((y * width + x) * 4) as usize;
+            let r = rgba[idx] as u32;
+            let g = rgba[idx + 1] as u32;
+            let b = rgba[idx + 2] as u32;
+            let lum = (r * 299 + g * 587 + b * 114) / 1000;
+            sum += lum;
+            count += 1;
+            if lum > max_lum {
+                max_lum = lum;
+            }
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    let patch_mean = sum / count;
+    // mean+25 rejects mostly-dark patches with stray bright pixels;
+    // max+50 rejects uniformly dim-but-not-pitch-black patches with no
+    // actual tile content.
+    if patch_mean < lo + 25 || max_lum < lo + 50 {
+        return None;
+    }
+
+    // --- Ray cast: walk outward until the tile-boundary dark run appears.
+    let edge_threshold = lo + 15;
+    const MAX_STEPS: i32 = 120;
+    const DARK_STREAK_REQ: i32 = 4;
+    let ray = |dx: i32, dy: i32| -> i32 {
+        let mut x = cursor_x;
+        let mut y = cursor_y;
+        let mut dark_streak = 0i32;
+        let mut last_bright = 0i32;
+        for step in 1..=MAX_STEPS {
+            let nx = x + dx;
+            let ny = y + dy;
+            if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                return last_bright;
+            }
+            x = nx;
+            y = ny;
+            let idx = ((y as u32 * width + x as u32) * 4) as usize;
+            let r = rgba[idx] as u32;
+            let g = rgba[idx + 1] as u32;
+            let b = rgba[idx + 2] as u32;
+            let lum = (r * 299 + g * 587 + b * 114) / 1000;
+            if lum < edge_threshold {
+                dark_streak += 1;
+                if dark_streak >= DARK_STREAK_REQ {
+                    return last_bright;
+                }
+            } else {
+                dark_streak = 0;
+                last_bright = step;
+            }
+        }
+        MAX_STEPS
+    };
+    let d_left = ray(-1, 0);
+    let d_right = ray(1, 0);
+    let d_up = ray(0, -1);
+    let d_down = ray(0, 1);
+
+    // Reject tight rects — usually means the cursor caught a stray bright
+    // speck rather than a real tile.
+    let raw_w = (d_left + d_right + 1) as u32;
+    let raw_h = (d_up + d_down + 1) as u32;
+    if raw_w < 20 || raw_h < 20 {
+        return None;
+    }
+
+    // Pad by 3px to match reference-icon framing (they include the darker
+    // tile border). Clamp to capture bounds.
+    const PAD: i32 = 3;
+    let rx0 = (cursor_x - d_left - PAD).max(0) as u32;
+    let ry0 = (cursor_y - d_up - PAD).max(0) as u32;
+    let rx1 = (cursor_x + d_right + PAD).min(w - 1) as u32;
+    let ry1 = (cursor_y + d_down + PAD).min(h - 1) as u32;
+
+    Some(TileRect {
+        x: rx0,
+        y: ry0,
+        w: rx1 - rx0 + 1,
+        h: ry1 - ry0 + 1,
+    })
 }
 
 /// Capture a focused region around the cursor biased upward (the shortName
@@ -151,6 +372,21 @@ pub fn scan_at_cursor() -> Result<Vec<String>, String> {
     let height = cap.height;
     let rgba = cap.rgba;
     debug_dump_rgba("capture", &rgba, width, height);
+
+    // Tile gate — short-circuits before preprocess+OCR when the cursor
+    // isn't on anything tile-shaped. OCR is the expensive step so
+    // bailing here is a real perf win on non-hover ticks.
+    if detect_highlighted_tile(
+        &rgba,
+        width,
+        height,
+        cap.cursor_x_in_capture,
+        cap.cursor_y_in_capture,
+    )
+    .is_none()
+    {
+        return Ok(vec!["__NO_TILE__".to_string()]);
+    }
 
     const SCALE: u32 = 4;
     let (processed, pw, ph) = preprocess(&rgba, width, height, SCALE);

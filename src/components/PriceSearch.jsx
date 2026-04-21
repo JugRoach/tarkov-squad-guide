@@ -3,6 +3,8 @@ import { T } from "../theme.js";
 import { API_URL } from "../constants.js";
 import { useScanAndFetch } from "../hooks/useScanAndFetch.js";
 import { useIconIndex } from "../hooks/useIconIndex.js";
+import { useDebouncedValue } from "../hooks/useDebounce.js";
+import { invoke as tauriInvoke } from "../lib/tauri.js";
 
 // Query for manual search (with prices)
 const PRICE_SEARCH_Q = (term, gameMode = "pve") =>
@@ -101,8 +103,8 @@ export default function PriceSearch() {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [popoutTip, setPopoutTip] = useState(false);
-  const debounceRef = useRef(null);
   const inputRef = useRef(null);
+  const debouncedQuery = useDebouncedValue(query, 200);
 
   const handlePrice = useCallback((priced, matched) => {
     setResults([priced]);
@@ -131,10 +133,8 @@ export default function PriceSearch() {
 
   useEffect(() => {
     if (scanning) return; // Don't run manual search while scanning
-    clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => doSearch(query), 200);
-    return () => clearTimeout(debounceRef.current);
-  }, [query, doSearch, scanning]);
+    doSearch(debouncedQuery);
+  }, [debouncedQuery, doSearch, scanning]);
 
   return (
     <div style={{ padding: "8px 10px", display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
@@ -177,10 +177,7 @@ export default function PriceSearch() {
             <div style={{ position: "relative" }}>
               <button
                 onClick={async () => {
-                  try {
-                    const { invoke } = await import("@tauri-apps/api/core");
-                    await invoke("open_scanner_popout");
-                  } catch (_) {}
+                  try { await tauriInvoke("open_scanner_popout"); } catch (_) {}
                 }}
                 onMouseEnter={() => setPopoutTip(true)}
                 onMouseLeave={() => setPopoutTip(false)}

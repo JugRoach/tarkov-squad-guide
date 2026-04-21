@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { T } from "../theme.js";
 import { SL, Tip } from "./ui/index.js";
+import { invoke as tauriInvoke, isTauri as tauriIsReady } from "../lib/tauri.js";
 
 // Phase A+B: resolves the Tarkov logs directory, scans every session under
 // it, pairs RaidStarted + RaidEnded events by shortId, and shows a raid
@@ -117,14 +118,13 @@ export default function LogWatcherSection({ myProfile, saveMyProfile }) {
     myProfile?.lastLogSync ? new Date(myProfile.lastLogSync) : null
   );
   const [error, setError] = useState(null);
-  const isTauri = typeof window !== "undefined" && !!window.__TAURI_INTERNALS__;
+  const isTauri = tauriIsReady();
 
   useEffect(() => {
     if (!isTauri) { setDetecting(false); return; }
     (async () => {
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const dir = await invoke("detect_tarkov_logs_dir");
+        const dir = await tauriInvoke("detect_tarkov_logs_dir");
         setLogsDir(dir || null);
       } catch (e) { setError(String(e?.message || e)); }
       setDetecting(false);
@@ -136,8 +136,7 @@ export default function LogWatcherSection({ myProfile, saveMyProfile }) {
     setScanning(true);
     setError(null);
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const sessions = await invoke("scan_logs_dir", { logsDir });
+      const sessions = await tauriInvoke("scan_logs_dir", { logsDir });
       setSessionCount(Array.isArray(sessions) ? sessions.length : 0);
       const summary = buildLogSummary(sessions || []);
       setRaids(summary.raids);

@@ -5,23 +5,18 @@
   "windows": ["main", "scanner-popout"],
   "permissions": [
     "core:default",
-    "shell:allow-open",
     "global-shortcut:allow-is-registered",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
     "global-shortcut:allow-unregister-all",
     "core:window:allow-set-always-on-top",
-    "core:window:allow-set-decorations",
-    "core:window:allow-set-size",
     "core:window:allow-set-focus",
     "core:window:allow-hide",
     "core:window:allow-show",
     "core:window:allow-is-visible",
-    "core:window:allow-start-dragging",
     "core:window:allow-set-ignore-cursor-events",
     "core:event:default",
     "updater:default",
-    "dialog:default",
     "process:default"
   ]
 }

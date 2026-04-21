@@ -5,10 +5,9 @@ import {
   getObjMeta,
   progressKey,
   isTaskComplete,
-  encodeProfile,
-  decodeProfile,
   getAllPrereqTaskIds,
 } from "./utils.js";
+import { encodeProfile, decodeProfile } from "./shareCodes.js";
 
 // ─── worldToPct ──────────────────────────────────────────────────────────
 

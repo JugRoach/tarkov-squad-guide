@@ -10,6 +10,7 @@ import { fetchAPI, ITEMS_SEARCH_Q } from '../api.js';
 import { traderSort } from '../constants.js';
 import { useStorage } from '../hooks/useStorage.js';
 import { useSquadRoom } from '../hooks/useSquadRoom.js';
+import { useDebouncedCallback } from '../hooks/useDebounce.js';
 // MapOverlay is lazy so Leaflet (~70KB + CSS) only loads when a route is rendered
 const MapOverlay = lazy(() => import('../components/MapOverlay.jsx'));
 import MapRecommendation from '../components/MapRecommendation.jsx';
@@ -53,8 +54,8 @@ export default function RaidTab({ myProfile, saveMyProfile, apiMaps, apiTasks, a
   const [expandedAnyTask, setExpandedAnyTask] = useState(null);
   const [manualPickMapId, setManualPickMapId] = useState(null);
   const [manualPickOverrides, setManualPickOverrides] = useState(null);
-  const qiDebounce = useRef(null);
-  const equipDebounce = useRef(null);
+  const { schedule: scheduleQiSearch } = useDebouncedCallback(300);
+  const { schedule: scheduleEquipSearch, cancel: cancelEquipSearch } = useDebouncedCallback(300);
 
   // Handle pending route task from profile screen
   useEffect(() => {
@@ -86,15 +87,14 @@ export default function RaidTab({ myProfile, saveMyProfile, apiMaps, apiTasks, a
   // Auto-search equipment with 300ms debounce as user types
   useEffect(() => {
     const term = equipSearch.trim();
-    clearTimeout(equipDebounce.current);
+    cancelEquipSearch();
     if (term.length < 2) {
       setEquipResults(null);
       setEquipSearching(false);
       return;
     }
     setEquipSearching(true);
-    equipDebounce.current = setTimeout(() => { searchEquipment(term); }, 300);
-    return () => clearTimeout(equipDebounce.current);
+    scheduleEquipSearch(() => { searchEquipment(term); });
   }, [equipSearch]);
 
   // Score loot points by tag relevance, return top 3 — exact tag matches score 3, "Barter item" gets 1
@@ -1012,15 +1012,14 @@ export default function RaidTab({ myProfile, saveMyProfile, apiMaps, apiTasks, a
             <input aria-label="Search items" value={qiSearch} onChange={e => {
               const val = e.target.value;
               setQiSearch(val);
-              clearTimeout(qiDebounce.current);
               if (val.length < 2) { setQiResults(null); setQiExpanded(null); return; }
               setQiSearching(true); setQiExpanded(null);
-              qiDebounce.current = setTimeout(() => {
+              scheduleQiSearch(() => {
                 fetchAPI(`{items(lang:en,name:"${val.replace(/"/g, '\\"')}"){id name shortName categories{name}}}`).then(d => {
                   setQiResults((d?.items || []).slice(0, 8));
                   setQiSearching(false);
                 }).catch(() => { setQiResults([]); setQiSearching(false); });
-              }, 300);
+              });
             }} placeholder="Start typing an item name..."
               style={{ ...T.input, width: "100%", fontSize: T.fs2 }} />
             {qiSearching && <div style={{ fontSize: T.fs2, color: T.textDim, marginTop: 6 }}>Searching...</div>}

@@ -1,6 +1,5 @@
 import { Component } from "react";
 
-// ─── GLOBAL CSS (hover/focus states, Leaflet theme) ─────────
 // ─── GLOBAL CSS (hover/focus states, Leaflet theme) ─────────────────────
 if (typeof document !== "undefined" && !document.getElementById("tg-global-css")) {
   const style = document.createElement("style");

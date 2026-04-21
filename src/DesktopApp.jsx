@@ -3,9 +3,11 @@ import { T, PLAYER_COLORS } from "./theme.js";
 import { useStorage } from "./hooks/useStorage.js";
 import { useUpdater } from "./hooks/useUpdater.js";
 import { fetchAPI, MAPS_Q, TASKS_Q, HIDEOUT_Q, TRADERS_Q } from "./api.js";
+import { DEFAULT_SCANNER_THRESHOLD } from "./constants.js";
 import { EMAPS } from "./lib/mapData.js";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import WelcomeBanner from "./components/WelcomeBanner.jsx";
+import { invoke as tauriInvoke } from "./lib/tauri.js";
 
 const TasksTab = lazy(() => import("./tabs/TasksTab.jsx"));
 const RaidTab = lazy(() => import("./tabs/RaidTab.jsx"));
@@ -23,22 +25,12 @@ const NAV_ITEMS = [
   { id: "profile", label: "Profile", icon: "▲" },
 ];
 
-// Tauri API helpers — loaded lazily
-let tauriInvoke = null;
-async function loadTauri() {
-  if (tauriInvoke) return;
-  try {
-    const core = await import("@tauri-apps/api/core");
-    tauriInvoke = core.invoke;
-  } catch (_) {}
-}
-
 function DesktopAppInner() {
   const [tab, setTab] = useState("tasks");
   const [overlayMode, setOverlayMode] = useState(false);
   const [myProfile, saveMyProfile, profileReady] = useStorage(
     "tg-myprofile-v3",
-    { id: "me_" + Math.random().toString(36).slice(2, 10), name: "", color: PLAYER_COLORS[0], tasks: [], progress: {}, pmcLevel: 1, traderLevels: {}, scannerThreshold: 20000 }
+    { id: "me_" + Math.random().toString(36).slice(2, 10), name: "", color: PLAYER_COLORS[0], tasks: [], progress: {}, pmcLevel: 1, traderLevels: {}, scannerThreshold: DEFAULT_SCANNER_THRESHOLD }
   );
   const [apiMaps, setApiMaps] = useState(null);
   const [apiTasks, setApiTasks] = useState(null);
@@ -128,12 +120,7 @@ function DesktopAppInner() {
   // Overlay toggle
   const toggleOverlay = async () => {
     const next = !overlayMode;
-    await loadTauri();
-    if (tauriInvoke) {
-      try {
-        await tauriInvoke("set_overlay_mode", { enabled: next });
-      } catch (_) {}
-    }
+    try { await tauriInvoke("set_overlay_mode", { enabled: next }); } catch (_) {}
     setOverlayMode(next);
   };
 

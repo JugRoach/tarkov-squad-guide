@@ -26,12 +26,11 @@ function cleanOcr(raw) {
 }
 
 /**
- * Crop a square region centered on the cursor from the full capture,
- * returning a fresh Uint8Array of RGBA. The tarkov.dev reference icons
- * are rendered at their native tile size (63x63 at 1x scale), so hashing
- * a ~65-80px square around the cursor lines up well for 1x1 items.
- * Multi-slot items lose some peripheral pixels but the distinctive
- * center of the icon is still captured.
+ * Crop a square region centered on the cursor from the full capture.
+ * Used as a fallback when the Rust-side tile detector doesn't return a
+ * rect (older paths, defensive case). For 1x1 items this lines up OK;
+ * multi-slot items suffer from aspect-ratio mismatch against the
+ * reference icons — the rect-based crop below fixes that.
  */
 function cropRgbaAroundCursor(rgba, width, height, cursorX, cursorY, cropSize) {
   const half = Math.floor(cropSize / 2);
@@ -44,6 +43,29 @@ function cropRgbaAroundCursor(rgba, width, height, cursorX, cursorY, cropSize) {
     out.set(rgba.subarray(srcRowStart, srcRowStart + cropSize * 4), dstRowStart);
   }
   return { rgba: out, width: cropSize, height: cropSize };
+}
+
+/**
+ * Crop the capture to the exact tile rect detected by the Rust scanner.
+ * Preserves the tile's true aspect ratio — critical for multi-slot items
+ * (rifles, cases) where a fixed square crop mismatches the reference
+ * icon's shape and degrades dHash accuracy.
+ */
+function cropRgbaFromRect(rgba, width, height, rect) {
+  const sx = Math.max(0, Math.min(width, rect.x | 0));
+  const sy = Math.max(0, Math.min(height, rect.y | 0));
+  const ex = Math.max(sx, Math.min(width, (rect.x + rect.w) | 0));
+  const ey = Math.max(sy, Math.min(height, (rect.y + rect.h) | 0));
+  const cw = ex - sx;
+  const ch = ey - sy;
+  if (cw <= 0 || ch <= 0) return null;
+  const out = new Uint8Array(cw * ch * 4);
+  for (let y = 0; y < ch; y++) {
+    const srcRowStart = ((sy + y) * width + sx) * 4;
+    const dstRowStart = y * cw * 4;
+    out.set(rgba.subarray(srcRowStart, srcRowStart + cw * 4), dstRowStart);
+  }
+  return { rgba: out, width: cw, height: ch };
 }
 
 /**
@@ -129,7 +151,9 @@ export function useScanAndFetch({ autoStart = false, onPrice, iconIndex = null }
       const first = lines?.[0] || "";
       if (first.startsWith("__")) {
         if (!mountedRef.current) return;
-        const label = first === "__NO_OCR__" ? "No text read at cursor" : first;
+        let label = first;
+        if (first === "__NO_OCR__") label = "No text read at cursor";
+        else if (first === "__NO_TILE__") label = "Not hovering a tile";
         setScanStatus(label);
         return;
       }
@@ -180,11 +204,21 @@ export function useScanAndFetch({ autoStart = false, onPrice, iconIndex = null }
       let queryHash = null;
       if (capture?.rgba && iconIdx?.length) {
         const rgbaU8 = new Uint8Array(capture.rgba);
-        const cropSize = Math.min(80, capture.width, capture.height);
-        const { rgba: tile, width: tw, height: th } = cropRgbaAroundCursor(
-          rgbaU8, capture.width, capture.height,
-          capture.cursorX, capture.cursorY, cropSize,
-        );
+        // Prefer the Rust-detected tile rect (preserves aspect ratio for
+        // multi-slot items, matching reference icons); fall back to a
+        // fixed 80px square around the cursor if detection didn't fire.
+        let cropped = null;
+        if (capture.tile) {
+          cropped = cropRgbaFromRect(rgbaU8, capture.width, capture.height, capture.tile);
+        }
+        if (!cropped) {
+          const cropSize = Math.min(80, capture.width, capture.height);
+          cropped = cropRgbaAroundCursor(
+            rgbaU8, capture.width, capture.height,
+            capture.cursorX, capture.cursorY, cropSize,
+          );
+        }
+        const { rgba: tile, width: tw, height: th } = cropped;
         // HDR captures compress the effective dynamic range — grays cluster
         // in a narrow band instead of spanning 0-255. Stretching the tile's
         // luminance histogram to the 5-95 percentile brings it back in line

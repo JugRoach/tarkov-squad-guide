@@ -47,10 +47,8 @@ pub struct LogSessionResult {
 }
 
 /// Parse a single session folder. Reads relevant `.log` files and returns
-/// every event we recognize. One-shot scan (Phase A) — a live watcher will
-/// follow in Phase B.
-#[tauri::command]
-pub fn scan_log_session(session_dir: String) -> Result<LogSessionResult, String> {
+/// every event we recognize. Used internally by `scan_logs_dir`.
+fn scan_log_session(session_dir: String) -> Result<LogSessionResult, String> {
     let dir = PathBuf::from(&session_dir);
     if !dir.is_dir() {
         return Err(format!("Not a directory: {session_dir}"));

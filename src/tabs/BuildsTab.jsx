@@ -6,6 +6,7 @@ import { encodeBuild, decodeBuild } from '../lib/shareCodes.js';
 import { optimizeBuild } from '../lib/buildOptimizer.js';
 import { calcStats, getCheapestPrice } from '../lib/buildStats.js';
 import { isAvailableForProfile } from '../lib/availability.js';
+import { useCopyToClipboard } from '../hooks/useCopyToClipboard.js';
 
 // Turn tarkov.dev caliber strings into readable labels:
 //   "Caliber556x45NATO" → "5.56x45 NATO"
@@ -71,7 +72,7 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
   const [buildName, setBuildName] = useState("");
   const [importCode, setImportCode] = useState("");
   const [importError, setImportError] = useState("");
-  const [copied, setCopied] = useState(null); // build id that was just copied
+  const { copied, copy } = useCopyToClipboard(); // `copied` = build id that was just copied
   const [gameMode, setGameMode] = useState("pve"); // "pve" | "regular"
   const [modSort, setModSort] = useState("name"); // "name" | "price" | "ergo" | "recoil"
 
@@ -219,7 +220,7 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
   const copyBuildCode = (build) => {
     const code = encodeBuild(build);
     if (!code) return;
-    try { navigator.clipboard.writeText(code).then(() => { setCopied(build.id); setTimeout(() => setCopied(null), 2500); }); } catch(e) {}
+    copy(code, build.id);
   };
 
   const importBuild = () => {

@@ -11,6 +11,9 @@ export const T = {
   purple:"#9080b0",purpleBg:"#1a141f",purpleBorder:"#3a2a5a",
   // Consolidated input/surface colors
   inputBg:"#151412",
+  // Gold-tinted background overlays (button rest/active states, highlight cells)
+  goldBgSubtle:"rgba(210,175,120,0.06)",
+  goldBgLight:"rgba(210,175,120,0.15)",
   // Spacing scale
   sp1:4, sp2:8, sp3:12, sp4:16, sp5:24,
   // Font sizes (1.25 ratio scale)

@@ -1,6 +1,6 @@
 {
-  "name": "tarkov-guide",
-  "version": "0.8.0",
+  "name": "tarkov-planner",
+  "version": "0.8.1",
   "private": true,
   "scripts": {
     "dev": "vite",
@@ -16,7 +16,6 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.99.3",
     "@tauri-apps/api": "^2.10.1",
-    "@tauri-apps/plugin-dialog": "^2.7.0",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "leaflet": "^1.9.4",
@@ -25,6 +24,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
+    "@resvg/resvg-js": "^2.6.2",
     "@tauri-apps/cli": "^2.10.1",
     "@vitejs/plugin-react": "^4.2.0",
     "eslint": "^9.39.4",

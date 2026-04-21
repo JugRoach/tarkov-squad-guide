@@ -4,9 +4,11 @@ import { SL, Tip } from '../components/ui/index.js';
 import LogWatcherSection from '../components/LogWatcherSection.jsx';
 import { encodeProfile, decodeProfile } from '../lib/shareCodes.js';
 import { TRADERS, FLEA_UNLOCK_LEVEL } from '../lib/availability.js';
+import { DEFAULT_SCANNER_THRESHOLD } from '../constants.js';
 import { useUpdater } from '../hooks/useUpdater.js';
+import { useCopyToClipboard } from '../hooks/useCopyToClipboard.js';
 
-const DESKTOP_RELEASES_URL = "https://github.com/JugRoach/tarkov-squad-guide/releases/latest";
+const DESKTOP_RELEASES_URL = "https://github.com/JugRoach/tarkov-planner/releases/latest";
 const APP_VERSION = typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : "dev";
 
 function DesktopAppSection() {
@@ -152,14 +154,14 @@ function DesktopAppSection() {
 }
 
 export default function ProfileTab({ myProfile, saveMyProfile, setTab }) {
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopyToClipboard();
   const [editingName, setEditingName] = useState(false);
   const [showRestore, setShowRestore] = useState(false);
   const [restoreCode, setRestoreCode] = useState("");
   const [restoreError, setRestoreError] = useState("");
   const copyCode = () => {
-    const code = encodeProfile(myProfile); if (!code) return;
-    try { navigator.clipboard.writeText(code).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2500); }).catch(() => { const ta = document.createElement("textarea"); ta.value = code; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); document.body.removeChild(ta); setCopied(true); setTimeout(() => setCopied(false), 2500); }); } catch(e) {}
+    const code = encodeProfile(myProfile);
+    if (code) copy(code);
   };
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
@@ -220,13 +222,13 @@ export default function ProfileTab({ myProfile, saveMyProfile, setTab }) {
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-            <div style={{ fontSize: T.fs2, color: T.textDim, letterSpacing: 0.8, flexShrink: 0, minWidth: 90 }}>PICKUP ₽/SLOT</div>
+            <div style={{ fontSize: T.fs2, color: T.textDim, letterSpacing: 0.8, flexShrink: 0, minWidth: 90, display: "flex", alignItems: "center", gap: 4 }}>PICKUP ₽/SLOT<Tip text="The scanner popout flags hovered items above this value-per-slot as worth picking up (green ✓ border) or below as skip (red ✗). Uses whichever sells for more — flea or best trader." /></div>
             <input
               type="number"
               min={0}
               max={1000000}
               step={1000}
-              value={myProfile.scannerThreshold ?? 20000}
+              value={myProfile.scannerThreshold ?? DEFAULT_SCANNER_THRESHOLD}
               onChange={(e) => {
                 const n = Math.max(0, parseInt(e.target.value, 10) || 0);
                 saveMyProfile({ ...myProfile, scannerThreshold: n });
