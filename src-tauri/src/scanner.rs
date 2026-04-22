@@ -180,6 +180,41 @@ pub fn ocr_tooltip_region() -> Result<Vec<String>, String> {
     Ok(lines)
 }
 
+/// OCR the full primary display for the task list scanner. The user holds
+/// Tarkov's task notebook open, triggers a capture via the task-scanner UI
+/// or global shortcut, and this returns every text line Windows OCR picks
+/// up. The JS side does fuzzy-match against tarkov.dev task names to filter
+/// out UI chrome (timestamps, trader names, chat, etc.). No
+/// upscale — the 1080p+ capture is already dense enough for the task-name
+/// font; preprocess still runs for HDR tone-mapping + RGBA→BGRA conversion.
+#[tauri::command]
+pub fn ocr_full_screen() -> Result<Vec<String>, String> {
+    let screens = Screen::all().map_err(|e| format!("Failed to enumerate screens: {e}"))?;
+    // Capture whichever display has the cursor on it — matches the Tarkov
+    // window for multi-monitor setups without needing the JS side to guess.
+    let (cx, cy) = get_cursor_pos().map_err(|e| format!("Failed to get cursor pos: {e}"))?;
+    let screen = screens
+        .into_iter()
+        .find(|s| {
+            let di = s.display_info;
+            (cx as i32) >= di.x
+                && (cx as i32) < di.x + di.width as i32
+                && (cy as i32) >= di.y
+                && (cy as i32) < di.y + di.height as i32
+        })
+        .ok_or_else(|| "Cursor not on any screen".to_string())?;
+    let di = screen.display_info;
+    let capture = screen
+        .capture_area(0, 0, di.width, di.height)
+        .map_err(|e| format!("Screen capture failed: {e}"))?;
+    let (width, height) = capture.dimensions();
+    let rgba = capture.into_raw();
+
+    let (processed, pw, ph) = preprocess(&rgba, width, height, 1);
+    let lines = ocr_lines(&processed, pw, ph).map_err(|e| format!("OCR failed: {e}"))?;
+    Ok(lines)
+}
+
 /// Zero out the alpha and RGB bytes inside a rect. Used to hide the
 /// hovered tile + above-left quadrant from the tooltip OCR pass.
 fn mask_region_to_black(rgba: &mut [u8], width: u32, height: u32, rx: u32, ry: u32, rw: u32, rh: u32) {

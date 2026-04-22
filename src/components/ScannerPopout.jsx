@@ -7,9 +7,9 @@ import { DEFAULT_SCANNER_THRESHOLD } from "../constants.js";
 const FLEA_UNLOCK_LEVEL = 15;
 
 function formatPrice(price) {
-  if (!price && price !== 0) return "\u2014";
-  if (Math.abs(price) >= 1000) return Math.round(price / 100) / 10 + "k\u20BD";
-  return price.toLocaleString() + "\u20BD";
+  if (!price && price !== 0) return "—";
+  if (Math.abs(price) >= 1000) return Math.round(price / 100) / 10 + "k₽";
+  return price.toLocaleString() + "₽";
 }
 
 // Subscribe to the profile stored in localStorage by the main window so the
@@ -66,7 +66,7 @@ export default function ScannerPopout() {
   const hasVerdict = item && perSlot != null;
   const above = hasVerdict && perSlot >= threshold;
   const verdictColor = !hasVerdict ? null : above ? T.success : T.error;
-  const verdictSymbol = !hasVerdict ? "" : above ? "\u2713" : "\u2717";
+  const verdictSymbol = !hasVerdict ? "" : above ? "✓" : "✗";
 
   return (
     <div style={{
@@ -110,7 +110,7 @@ export default function ScannerPopout() {
             lineHeight: 1.6,
           }}
         >
-          {dbLoading ? "..." : scanning ? "\u25A0" : "\u25B6"}
+          {dbLoading ? "..." : scanning ? "■" : "▶"}
         </button>
         <div style={{
           flex: 1,
@@ -128,17 +128,19 @@ export default function ScannerPopout() {
         </div>
       </div>
 
-      {/* Item result — compact */}
-      <div style={{ flex: 1, padding: "5px 7px", overflow: "hidden" }}>
+      {/* Item result — low-profile. Left-edge border color is the primary
+          pickup/skip signal; the inline verdict glyph is a smaller backup
+          cue so it doesn't dominate the card. */}
+      <div style={{ flex: 1, padding: "4px 7px", overflow: "hidden" }}>
         {item ? (
           <div>
-            {/* Name + mini icon on one row */}
-            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
+            {/* Name + mini icon + verdict glyph on one row */}
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
               {item.gridImageLink && (
                 <img
                   src={item.gridImageLink}
                   alt=""
-                  style={{ width: 28, height: 28, objectFit: "contain", flexShrink: 0, opacity: 0.85 }}
+                  style={{ width: 24, height: 24, objectFit: "contain", flexShrink: 0, opacity: 0.85 }}
                 />
               )}
               <div style={{
@@ -157,7 +159,7 @@ export default function ScannerPopout() {
                 <span style={{
                   color: verdictColor,
                   fontWeight: "bold",
-                  fontSize: T.fs4,
+                  fontSize: T.fs3,
                   lineHeight: 1,
                   flexShrink: 0,
                 }}>{verdictSymbol}</span>
@@ -169,7 +171,7 @@ export default function ScannerPopout() {
                 to read the number without knowing WHICH sell path produces
                 it — matters most for cheap items where flea and vendor
                 can differ by 10×. */}
-            <div style={{ display: "flex", alignItems: "baseline", gap: 5, marginBottom: 4 }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 5, marginBottom: 2 }}>
               <span style={{ fontSize: T.fs1, color: T.textDim, letterSpacing: 0.5 }}>PER/SLOT</span>
               <span style={{
                 fontSize: T.fs4,
@@ -177,7 +179,7 @@ export default function ScannerPopout() {
                 color: verdictColor || (perSlot ? T.textBright : T.textDim),
                 lineHeight: 1,
               }}>
-                {perSlot ? formatPrice(perSlot) : "\u2014"}
+                {perSlot ? formatPrice(perSlot) : "—"}
               </span>
               {bestSource && (
                 <span style={{
@@ -192,38 +194,48 @@ export default function ScannerPopout() {
               <span style={{ fontSize: T.fs1, color: T.textDim }}>({slots}s)</span>
             </div>
 
-            {/* Both prices stacked. The one matching the PER/SLOT value is
-                bolded gold so it's obvious which path the big number came
-                from. The other stays visible for comparison. */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: T.fs1 }}>
-              <div style={{
+            {/* Prices collapsed to ONE comparison line: Flea · Trader.
+                Winning source is bolded gold (same as the per-slot source
+                tag above), losing source stays dim for reference. Saves a
+                row over the previous stacked layout. */}
+            <div style={{ fontSize: T.fs1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              <span style={{
                 fontWeight: bestSource === "Flea" ? "bold" : "normal",
-                color: bestSource === "Flea" ? T.gold : undefined,
+                color: bestSource === "Flea" ? T.gold : T.textDim,
               }}>
-                <span style={{ color: T.textDim }}>Flea </span>
-                <span style={{ color: fleaPrice ? T.textBright : T.textDim }}>{formatPrice(fleaPrice)}</span>
+                Flea{" "}
+                <span style={{
+                  color: fleaPrice
+                    ? (bestSource === "Flea" ? T.gold : T.textBright)
+                    : T.textDim,
+                }}>
+                  {formatPrice(fleaPrice)}
+                </span>
                 {change != null && change !== 0 && (
-                  <span style={{ color: change > 0 ? T.success : T.error, marginLeft: 3 }}>
+                  <span style={{ color: change > 0 ? T.success : T.error, marginLeft: 2 }}>
                     {change > 0 ? "+" : ""}{Math.round(change)}%
                   </span>
                 )}
                 {!canUseFlea && fleaPrice ? (
-                  <span style={{ color: T.textDim, marginLeft: 4, fontSize: 9 }}>
+                  <span style={{ color: T.textDim, marginLeft: 3, fontSize: 9 }}>
                     (lv {FLEA_UNLOCK_LEVEL}+)
                   </span>
                 ) : null}
-              </div>
-              <div style={{
+              </span>
+              <span style={{ color: T.textDim, margin: "0 5px" }}>·</span>
+              <span style={{
                 fontWeight: bestSource && bestSource !== "Flea" ? "bold" : "normal",
-                color: bestSource && bestSource !== "Flea" ? T.gold : undefined,
+                color: bestSource && bestSource !== "Flea" ? T.gold : T.textDim,
               }}>
-                <span style={{ color: T.textDim }}>
-                  {bestSell?.vendor?.name || "Trader"}{" "}
+                {bestSell?.vendor?.name || "Trader"}{" "}
+                <span style={{
+                  color: bestSell
+                    ? (bestSource && bestSource !== "Flea" ? T.gold : T.textBright)
+                    : T.textDim,
+                }}>
+                  {bestSell ? formatPrice(bestSell.priceRUB) : "—"}
                 </span>
-                <span style={{ color: bestSell ? T.textBright : T.textDim }}>
-                  {bestSell ? formatPrice(bestSell.priceRUB) : "\u2014"}
-                </span>
-              </div>
+              </span>
             </div>
           </div>
         ) : (

@@ -3,7 +3,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { T } from "../theme.js";
 import { fetchAPI, TASKS_Q, MAPS_Q } from "../api.js";
-import { MAP_BOUNDS, MAP_SVG_NAMES } from "../lib/mapData.js";
+import { MAP_BOUNDS, MAP_SVG_NAMES, EMAPS } from "../lib/mapData.js";
 import {
   buildObjectiveMarkers,
   tasksWithObjectivesOnMap,
@@ -12,7 +12,13 @@ import {
 
 const MAP_STORAGE_KEY = "tg-taskmap-mapid-v1";
 const TASKS_STORAGE_KEY = "tg-taskmap-tasks-v1"; // { [mapId]: [taskId, ...] }
+const EXTRACTS_STORAGE_KEY = "tg-taskmap-extracts-v1"; // { pmc: bool, scav: bool }
 const PROFILE_STORAGE_KEY = "tg-myprofile-v3";
+
+// Faction colors for extract markers + labels. Matches the PMC/SCAV
+// color scheme used on the Intel tab's extracts view.
+const EXTRACT_COLOR_PMC = "#5cc8e6";
+const EXTRACT_COLOR_SCAV = "#7ab87a";
 
 // Tarkov's internal map names (from RaidStarted events in logs) → our
 // normalizedName. Mirrors the mapping in LogWatcherSection.prettyMap but in
@@ -104,6 +110,16 @@ export default function TaskMapPopout() {
     try { return JSON.parse(localStorage.getItem(TASKS_STORAGE_KEY)) || {}; }
     catch (_) { return {}; }
   });
+  const [extractFactions, setExtractFactions] = useState(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem(EXTRACTS_STORAGE_KEY));
+      return raw && typeof raw === "object"
+        ? { pmc: !!raw.pmc, scav: !!raw.scav }
+        : { pmc: false, scav: false };
+    } catch (_) {
+      return { pmc: false, scav: false };
+    }
+  });
   const [tasksOpen, setTasksOpen] = useState(false);
   const tasksBtnRef = useRef(null);
 
@@ -172,6 +188,11 @@ export default function TaskMapPopout() {
     localStorage.setItem(TASKS_STORAGE_KEY, JSON.stringify(selectionsByMap));
   }, [selectionsByMap]);
 
+  // Persist extract faction toggles (global, not per-map)
+  useEffect(() => {
+    localStorage.setItem(EXTRACTS_STORAGE_KEY, JSON.stringify(extractFactions));
+  }, [extractFactions]);
+
   // Close the tasks dropdown on outside-click
   useEffect(() => {
     if (!tasksOpen) return;
@@ -215,6 +236,29 @@ export default function TaskMapPopout() {
     () => buildObjectiveMarkers(apiTasks, selectedTaskIds, selectedMap, myProfile),
     [apiTasks, selectedTaskIds, selectedMap, myProfile]
   );
+
+  // Extract markers from our hand-maintained EMAPS entries (the tarkov.dev
+  // API doesn't expose extract positions). Skip coop-only extracts (not
+  // usable in PvE) and any entry whose `pct` is null.
+  const extractMarkers = useMemo(() => {
+    if (!selectedMap) return [];
+    const em = EMAPS.find((e) => e.id === selectedMap.normalizedName);
+    if (!em) return [];
+    const out = [];
+    if (extractFactions.pmc) {
+      for (const ex of em.pmcExtracts || []) {
+        if (ex.type === "coop" || !ex.pct) continue;
+        out.push({ ...ex, faction: "pmc", color: EXTRACT_COLOR_PMC });
+      }
+    }
+    if (extractFactions.scav) {
+      for (const ex of em.scavExtracts || []) {
+        if (ex.type === "coop" || !ex.pct) continue;
+        out.push({ ...ex, faction: "scav", color: EXTRACT_COLOR_SCAV });
+      }
+    }
+    return out;
+  }, [selectedMap, extractFactions]);
 
   // ── Leaflet map init ─────────────────────────────────────────────────
   useEffect(() => {
@@ -305,7 +349,53 @@ export default function TaskMapPopout() {
       );
       layer.addLayer(marker);
     }
-  }, [markers]);
+
+    // Extract markers: diamond icon with the extract name as a pill above.
+    // divIcon is sized so the diamond's centre sits exactly on the coords
+    // and the label floats above it, sharing the same anchor point.
+    for (const ex of extractMarkers) {
+      const diamondSize = 14;
+      const totalHeight = diamondSize + 18; // label ≈ 14px + margin
+      const iconWidth = 120; // wide enough that long names don't clip
+      const html = `<div style="
+        display:flex;flex-direction:column;align-items:center;
+        width:${iconWidth}px;pointer-events:none;">
+        <div style="
+          background:rgba(13,17,23,0.92);color:${ex.color};
+          padding:1px 5px;font-size:10px;font-family:${T.sans};
+          white-space:nowrap;border-radius:3px;
+          border:1px solid ${ex.color}66;
+          box-shadow:0 1px 3px rgba(0,0,0,0.6);
+          margin-bottom:2px;pointer-events:auto;">${esc(ex.name)}</div>
+        <div style="
+          width:${diamondSize}px;height:${diamondSize}px;
+          background:${ex.color};border:2px solid rgba(0,0,0,0.7);
+          transform:rotate(45deg);box-shadow:0 0 4px rgba(0,0,0,0.6);
+          pointer-events:auto;"></div>
+      </div>`;
+      const icon = L.divIcon({
+        html,
+        className: "",
+        iconSize: [iconWidth, totalHeight],
+        // Anchor the diamond's centre, not the container's — label floats above.
+        iconAnchor: [iconWidth / 2, totalHeight - diamondSize / 2],
+      });
+      const marker = L.marker(toLL(ex.pct), { icon });
+      const factionLabel = ex.faction === "pmc" ? "▲ PMC" : "◆ SCAV";
+      const typeLine = ex.note
+        ? `<div style="color:${T.textDim};font-size:10px;margin-top:2px">${esc(ex.note)}</div>`
+        : "";
+      marker.bindPopup(
+        `<div style="max-width:200px">
+          <div style="color:${ex.color};font-weight:bold;margin-bottom:3px">${esc(ex.name)}</div>
+          <div style="color:${T.textBright};font-size:10px">${factionLabel} · ${esc(ex.type)}</div>
+          ${typeLine}
+        </div>`,
+        { className: "tg-taskmap-popup", closeButton: false, autoPan: false, maxWidth: 220 }
+      );
+      layer.addLayer(marker);
+    }
+  }, [markers, extractMarkers]);
 
   // ── UI handlers ──────────────────────────────────────────────────────
   const toggleTask = (taskId) => {
@@ -412,42 +502,86 @@ export default function TaskMapPopout() {
               background: T.surface,
               border: `1px solid ${T.border}`,
               borderRadius: T.r1,
-              maxHeight: 280,
+              maxHeight: 320,
               overflowY: "auto",
               boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
             }}>
+              {/* Sticky header: extracts toggles + tasks all/none. */}
               <div style={{
-                display: "flex",
-                gap: 4,
-                padding: 4,
-                borderBottom: `1px solid ${T.border}`,
                 position: "sticky",
                 top: 0,
                 background: T.surface,
-                zIndex: 1,
+                zIndex: 2,
+                borderBottom: `1px solid ${T.border}`,
               }}>
-                <button
-                  onClick={selectAll}
-                  title="Select every active task that has objectives on this map."
-                  style={{
-                    flex: 1, background: "transparent",
-                    border: `1px solid ${T.border}`, color: T.textDim,
-                    fontSize: 10, padding: "3px 4px",
-                    cursor: "pointer", fontFamily: T.sans,
-                    borderRadius: T.r1,
-                  }}
-                >All</button>
-                <button
-                  onClick={selectNone}
-                  title="Clear all task selections for this map. Chits disappear from the map."
-                  style={{
-                    flex: 1, background: "transparent",
-                    border: `1px solid ${T.border}`, color: T.textDim,
-                    fontSize: 10, padding: "3px 4px",
-                    cursor: "pointer", fontFamily: T.sans,
-                    borderRadius: T.r1,
-                  }}
-                >None</button>
+                <div style={{ padding: "4px 8px 6px", borderBottom: `1px solid ${T.border}` }}>
+                  <div style={{
+                    fontSize: 10, color: T.textDim, letterSpacing: 1,
+                    marginBottom: 4, fontFamily: T.sans,
+                  }}>EXTRACTS</div>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    {[
+                      { key: "pmc", label: "▲ PMC", color: EXTRACT_COLOR_PMC,
+                        title: "Show PMC extracts on the current map. Name labels float above each extract; click for details." },
+                      { key: "scav", label: "◆ SCAV", color: EXTRACT_COLOR_SCAV,
+                        title: "Show SCAV extracts on the current map. Name labels float above each extract; click for details." },
+                    ].map(({ key, label, color, title }) => {
+                      const active = extractFactions[key];
+                      return (
+                        <button
+                          key={key}
+                          onClick={() =>
+                            setExtractFactions((prev) => ({ ...prev, [key]: !prev[key] }))
+                          }
+                          title={title}
+                          style={{
+                            flex: 1,
+                            background: active ? `${color}22` : "transparent",
+                            border: `1px solid ${active ? color : T.border}`,
+                            color: active ? color : T.textDim,
+                            fontSize: 10,
+                            padding: "4px 6px",
+                            cursor: "pointer",
+                            fontFamily: T.sans,
+                            borderRadius: T.r1,
+                            letterSpacing: 0.5,
+                          }}
+                        >{label}</button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div style={{
+                  display: "flex", gap: 4, padding: 4, alignItems: "center",
+                }}>
+                  <div style={{
+                    fontSize: 10, color: T.textDim, letterSpacing: 1,
+                    padding: "0 4px", fontFamily: T.sans, flexShrink: 0,
+                  }}>TASKS</div>
+                  <div style={{ flex: 1 }} />
+                  <button
+                    onClick={selectAll}
+                    title="Select every active task that has objectives on this map."
+                    style={{
+                      background: "transparent",
+                      border: `1px solid ${T.border}`, color: T.textDim,
+                      fontSize: 10, padding: "3px 8px",
+                      cursor: "pointer", fontFamily: T.sans,
+                      borderRadius: T.r1,
+                    }}
+                  >All</button>
+                  <button
+                    onClick={selectNone}
+                    title="Clear all task selections for this map. Chits disappear from the map."
+                    style={{
+                      background: "transparent",
+                      border: `1px solid ${T.border}`, color: T.textDim,
+                      fontSize: 10, padding: "3px 8px",
+                      cursor: "pointer", fontFamily: T.sans,
+                      borderRadius: T.r1,
+                    }}
+                  >None</button>
+                </div>
               </div>
               {tasksOnMap.length === 0 && (
                 <div style={{ padding: 10, fontSize: T.fs1, color: T.textDim, textAlign: "center" }}>

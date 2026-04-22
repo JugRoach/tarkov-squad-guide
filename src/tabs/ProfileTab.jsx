@@ -153,7 +153,7 @@ function DesktopAppSection() {
   );
 }
 
-export default function ProfileTab({ myProfile, saveMyProfile, setTab }) {
+export default function ProfileTab({ myProfile, saveMyProfile, setTab, onOpenTaskScanner }) {
   const { copied, copy } = useCopyToClipboard();
   const [editingName, setEditingName] = useState(false);
   const [showRestore, setShowRestore] = useState(false);
@@ -272,6 +272,35 @@ export default function ProfileTab({ myProfile, saveMyProfile, setTab }) {
             })}
           </div>
         </div>
+
+        {/* ── TASK SCANNER (Tauri only — web build's onOpenTaskScanner is undefined) ── */}
+        {onOpenTaskScanner && (
+          <>
+            <SL c={<>IMPORT TASKS FROM GAME<Tip text="OCRs your screen, fuzzy-matches every detected line against tarkov.dev task names, and shows a preview of the proposed imports so nothing happens silently. Also bound to Ctrl+Alt+T globally — press it while in Tarkov to scan without Alt+Tabbing." /></>} />
+            <div style={{ background: T.surface, border: `1px solid ${T.gold}44`, borderLeft: `2px solid ${T.gold}`, padding: 12, marginBottom: 16 }}>
+              <div style={{ fontSize: T.fs2, color: T.text, lineHeight: 1.7, marginBottom: 10 }}>
+                Open Tarkov's task notebook to the Active or Available tab. Clicking below (or pressing <b>Ctrl+Alt+T</b> anywhere) runs a 3-second countdown so you can Alt+Tab back to Tarkov, then OCRs that display. Every detected task is shown with its fuzzy-match confidence before anything imports.
+              </div>
+              <button
+                onClick={onOpenTaskScanner}
+                style={{
+                  width: "100%",
+                  background: T.gold + "22",
+                  border: `2px solid ${T.gold}`,
+                  color: T.gold,
+                  padding: "10px 0",
+                  fontSize: T.fs2,
+                  cursor: "pointer",
+                  fontFamily: T.sans,
+                  letterSpacing: 1,
+                  textTransform: "uppercase",
+                  fontWeight: "bold",
+                  borderRadius: T.r2,
+                }}
+              >⟟ SCAN TARKOV NOTEBOOK</button>
+            </div>
+          </>
+        )}
 
         {/* ── LOG WATCHER ── */}
         <LogWatcherSection myProfile={myProfile} saveMyProfile={saveMyProfile} />

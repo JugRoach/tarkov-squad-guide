@@ -97,6 +97,7 @@ pub fn run() {
             scanner::scan_at_cursor,
             scanner::capture_rgba_at_cursor,
             scanner::ocr_tooltip_region,
+            scanner::ocr_full_screen,
             open_scanner_popout,
             open_task_map_popout,
             log_watcher::detect_tarkov_logs_dir,
@@ -174,6 +175,28 @@ pub fn run() {
                     open_task_map_popout_on_main(h);
                 }
             })?;
+
+            // Ctrl+Alt+T: task list scanner — emits an event to the main
+            // window so the React side can run the OCR + fuzzy-match flow.
+            // Also show+focus the main window so the preview modal is
+            // immediately visible when the user Alt+Tabs back from Tarkov.
+            {
+                let handle = app.handle().clone();
+                let shortcut = Shortcut::new(
+                    Some(Modifiers::CONTROL | Modifiers::ALT),
+                    Code::KeyT,
+                );
+                app.global_shortcut()
+                    .on_shortcut(shortcut, move |_app, _sc, event| {
+                        if event.state == ShortcutState::Pressed {
+                            if let Some(window) = handle.get_webview_window("main") {
+                                let _ = window.emit("task-scan-start", ());
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    })?;
+            }
 
             Ok(())
         })

@@ -2,12 +2,15 @@ import { useState, useEffect, useMemo, lazy, Suspense } from "react";
 import { T, PLAYER_COLORS } from "./theme.js";
 import { useStorage } from "./hooks/useStorage.js";
 import { useUpdater } from "./hooks/useUpdater.js";
+import { useProfileCloudSync } from "./hooks/useProfileCloudSync.js";
 import { fetchAPI, MAPS_Q, TASKS_Q, HIDEOUT_Q, TRADERS_Q } from "./api.js";
 import { DEFAULT_SCANNER_THRESHOLD } from "./constants.js";
 import { EMAPS } from "./lib/mapData.js";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import WelcomeBanner from "./components/WelcomeBanner.jsx";
-import { invoke as tauriInvoke } from "./lib/tauri.js";
+import { invoke as tauriInvoke, listen as tauriListen } from "./lib/tauri.js";
+
+const TaskScannerModal = lazy(() => import("./components/TaskScannerModal.jsx"));
 
 const TasksTab = lazy(() => import("./tabs/TasksTab.jsx"));
 const RaidTab = lazy(() => import("./tabs/RaidTab.jsx"));
@@ -48,11 +51,29 @@ function DesktopAppInner() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQ, setSearchQ] = useState("");
   const [apiRetry, setApiRetry] = useState(0);
+  const [taskScannerOpen, setTaskScannerOpen] = useState(false);
   const updater = useUpdater({ autoCheck: true });
+
+  // Auto-sync profile to Supabase — survives localStorage wipes and app
+  // reinstalls. Silent no-op in web/PWA without env vars or if the
+  // `user_profiles` table hasn't been migrated yet (see
+  // supabase/migrations/20260422_user_profiles.sql).
+  useProfileCloudSync(myProfile, saveMyProfile, profileReady);
 
   useEffect(() => {
     if (profileReady && !welcomed) setShowWelcome(true);
   }, [profileReady, welcomed]);
+
+  // Ctrl+Alt+T triggers the global shortcut in Rust, which emits this
+  // event back to the main window. We just open the scanner modal; the
+  // modal does its own countdown + OCR trigger.
+  useEffect(() => {
+    let unlisten;
+    (async () => {
+      unlisten = await tauriListen("task-scan-start", () => setTaskScannerOpen(true));
+    })();
+    return () => { if (typeof unlisten === "function") unlisten(); };
+  }, []);
 
   // Fetch API data (re-runs when apiRetry bumps)
   useEffect(() => {
@@ -446,10 +467,28 @@ function DesktopAppInner() {
             {tab === "prices" && <PriceSearch />}
             {tab === "builds" && <BuildsTab savedBuilds={savedBuilds} saveSavedBuilds={saveSavedBuilds} myProfile={myProfile} />}
             {tab === "intel" && <IntelTab />}
-            {tab === "profile" && <ProfileTab myProfile={myProfile} saveMyProfile={saveMyProfile} setTab={setTab} />}
+            {tab === "profile" && (
+              <ProfileTab
+                myProfile={myProfile}
+                saveMyProfile={saveMyProfile}
+                setTab={setTab}
+                apiTasks={apiTasks}
+                onOpenTaskScanner={() => setTaskScannerOpen(true)}
+              />
+            )}
           </div>
         </Suspense>
       </main>
+      {taskScannerOpen && (
+        <Suspense fallback={null}>
+          <TaskScannerModal
+            apiTasks={apiTasks}
+            myProfile={myProfile}
+            saveMyProfile={saveMyProfile}
+            onClose={() => setTaskScannerOpen(false)}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }
