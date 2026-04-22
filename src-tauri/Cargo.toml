@@ -1,6 +1,6 @@
 [package]
 name = "tarkov-guide"
-version = "0.9.0"
+version = "0.9.1"
 description = "Tarkov Planner — PvE field reference, route planner, scanner"
 authors = ["Matt"]
 edition = "2021"
