@@ -24,6 +24,7 @@ fn set_click_through(window: tauri::WebviewWindow, enabled: bool) -> Result<(), 
         .map_err(|e| e.to_string())
 }
 
+
 // Internal: runs on the Tauri main thread. Called both by the async `open_scanner_popout`
 // command and by the Alt+P global-shortcut handler.
 fn open_scanner_popout_on_main(app: &tauri::AppHandle) {
@@ -177,10 +178,20 @@ pub fn run() {
                 }
             })?;
 
-            // Ctrl+Alt+T: task list scanner — emits an event to the main
-            // window so the React side can run the OCR + fuzzy-match flow.
-            // Also show+focus the main window so the preview modal is
-            // immediately visible when the user Alt+Tabs back from Tarkov.
+            // Ctrl+Alt+T: task list scanner. Branches on main-window focus:
+            //
+            //  * NOT focused (user is in Tarkov) → emit `task-scan-immediate`.
+            //    No countdown, no focus steal — React captures OCR while the
+            //    main window stays behind Tarkov, merges results into the
+            //    modal (opening it silently if needed), and plays a system
+            //    beep so the user knows the scan landed. They Alt+Tab to
+            //    review when they're done scrolling the notebook.
+            //
+            //  * Focused (user is in the app) → emit `task-scan-start`.
+            //    Countdown flow so the user has time to Alt+Tab to Tarkov
+            //    before capture, same as the Profile-tab button.
+            //
+            // Either way the React side owns window state from here on.
             {
                 let handle = app.handle().clone();
                 let shortcut = Shortcut::new(
@@ -191,9 +202,9 @@ pub fn run() {
                     .on_shortcut(shortcut, move |_app, _sc, event| {
                         if event.state == ShortcutState::Pressed {
                             if let Some(window) = handle.get_webview_window("main") {
-                                let _ = window.emit("task-scan-start", ());
-                                let _ = window.show();
-                                let _ = window.set_focus();
+                                let focused = window.is_focused().unwrap_or(false);
+                                let event_name = if focused { "task-scan-start" } else { "task-scan-immediate" };
+                                let _ = window.emit(event_name, ());
                             }
                         }
                     })?;

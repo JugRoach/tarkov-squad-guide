@@ -1,36 +1,125 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { T } from "../theme.js";
-import { findTopMatches } from "../lib/fuzzyMatch.js";
+import { buildMatchIndex, findTopMatches } from "../lib/fuzzyMatch.js";
 import { invoke } from "../lib/tauri.js";
+import { mergeTaskLines, isAmbiguousPartSiblings, expandSeriesAlternates, PART_FRAGMENT_RE } from "../lib/taskScanUtils.js";
 import { Tip } from "./ui/index.js";
 
-// Threshold under which an OCR line is discarded entirely (probably UI
-// chrome, not a task name). Task names are typically >=3 distinctive
-// words, so 0.6 reliably separates task text from timestamps, trader
-// chatter, etc.
-const MIN_MATCH_SCORE = 0.6;
+// Short, quiet system-confirmation chirp via Web Audio. Cross-platform and
+// dependency-free — used when an immediate (no-countdown) scan completes
+// while the main window is behind Tarkov, so the user hears that their
+// Ctrl+Alt+T keypress landed.
+function playScanBeep() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = "sine";
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.04, ctx.currentTime + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.12);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.13);
+    osc.onended = () => ctx.close().catch(() => {});
+  } catch {
+    /* silent — beep is nice-to-have */
+  }
+}
+
+// Threshold under which an OCR line is discarded entirely. Task names are
+// long multi-token phrases, so 0.75 works alongside tokenScore's bidirectional
+// coverage to drop location-column leakage ("Lighthouse" → "Revision –
+// Lighthouse") while still accepting real task-name captures.
+const MIN_MATCH_SCORE = 0.75;
 
 // Auto-check any match with confidence at or above this. User can still
 // uncheck it. Lower-confidence matches surface in the list but start
 // unchecked so the default "Import" action is conservative.
-const AUTO_CHECK_SCORE = 0.85;
+const AUTO_CHECK_SCORE = 0.9;
+
+// Tarkov map names that appear in the notebook's Location column. When an
+// OCR line is exactly one of these, the match is almost certainly leakage
+// from the location column rather than a task-name read. We still propose
+// the match (there IS a Prapor task literally named "Reserve", so we don't
+// hard-reject), but start it unchecked so the user has to opt in.
+const LOCATION_NAMES = new Set([
+  "customs", "factory", "woods", "shoreline", "interchange", "reserve",
+  "labs", "the lab", "lighthouse", "streets of tarkov", "ground zero",
+  "any location",
+]);
 
 // Multiple similar-looking OCR lines can match the same task (wrapped
 // text, repeated UI). We dedupe by taskId and keep the highest-scoring
 // line as the single proposal for that task.
 
-export default function TaskScannerModal({ apiTasks, myProfile, saveMyProfile, onClose }) {
-  const [phase, setPhase] = useState("countdown"); // countdown | scanning | review | error
-  const [countdown, setCountdown] = useState(3);
+const COUNTDOWN_SECONDS = 5;
+
+
+export default function TaskScannerModal({
+  apiTasks,
+  myProfile,
+  saveMyProfile,
+  scanMode = "countdown",
+  scanTrigger = 0,
+  onClose,
+}) {
+  // `scanMode === "immediate"` means Ctrl+Alt+T fired while the user was in
+  // Tarkov — skip the countdown entirely and go straight to capture.
+  const [phase, setPhase] = useState(scanMode === "immediate" ? "scanning" : "countdown");
+  const [countdown, setCountdown] = useState(COUNTDOWN_SECONDS);
   const [error, setError] = useState(null);
   const [rawLines, setRawLines] = useState([]);
-  // proposals[i] = { line, task, score, checked, alternates }
+  const [showRaw, setShowRaw] = useState(false);
+  // proposals[i] = { line, task, score, checked, alternates, userToggled }
   const [proposals, setProposals] = useState([]);
+  // Track scanMode in a ref so the scanning effect can read it without
+  // re-running whenever the mode flips between triggers.
+  const scanModeRef = useRef(scanMode);
+  useEffect(() => { scanModeRef.current = scanMode; }, [scanMode]);
+
+  // Pre-built match index. Task names lack shortNames, so shortName is "" —
+  // matching happens against name + tokens only. Rebuilding this per OCR line
+  // (which findTopMatches would do via normalizeIndex) would tokenize all
+  // ~300 tasks hundreds of times; one memo avoids that.
+  const matchIndex = useMemo(() => {
+    const candidates = (apiTasks || []).map((t) => ({
+      id: t.id,
+      name: t.name,
+      shortName: "",
+      _task: t,
+    }));
+    return buildMatchIndex(candidates);
+  }, [apiTasks]);
+
+  // React to scanTrigger bumps from the parent — each Ctrl+Alt+T press (or
+  // Profile-tab button click) increments the counter, telling us to re-run
+  // the capture. In immediate mode we go straight to scanning; in
+  // countdown mode we reset the countdown so the user has time to Alt+Tab.
+  // Initial mount skips this (trigger equals its starting value), because
+  // the scanning effect will already fire for phase="scanning" via the
+  // initial-state branch.
+  const lastTriggerRef = useRef(scanTrigger);
+  useEffect(() => {
+    if (scanTrigger === lastTriggerRef.current) return;
+    lastTriggerRef.current = scanTrigger;
+    setError(null);
+    if (scanMode === "immediate") {
+      setPhase("scanning");
+    } else {
+      setCountdown(COUNTDOWN_SECONDS);
+      setPhase("countdown");
+    }
+  }, [scanTrigger, scanMode]);
 
   // Countdown so the user can Alt+Tab back to Tarkov before capture fires.
-  // When the global Ctrl+Alt+T shortcut triggers us, user is probably
-  // already in Tarkov and a countdown just delays them — but they can't
-  // dismiss it fast enough to hurt either way. 3s is a middle ground.
+  // 5s is the sweet spot — enough to recover from an alt-tab fumble, not so
+  // long that the user thinks the app hung. "Scan now" button bypasses it
+  // when the user is already on Tarkov's display.
   useEffect(() => {
     if (phase !== "countdown") return;
     if (countdown <= 0) {
@@ -50,33 +139,71 @@ export default function TaskScannerModal({ apiTasks, myProfile, saveMyProfile, o
         const lines = (await invoke("ocr_full_screen")) || [];
         if (cancelled) return;
         setRawLines(lines || []);
-        const candidates = (apiTasks || []).map((t) => ({
-          id: t.id,
-          name: t.name,
-          shortName: "", // tasks don't have short names; match is against `name`
-          _task: t,
-        }));
+        const mergedLines = mergeTaskLines(lines);
         const existingIds = new Set((myProfile?.tasks || []).map((t) => t?.taskId).filter(Boolean));
-        const byTaskId = new Map(); // taskId → best proposal
-        for (const line of lines) {
-          const matches = findTopMatches(line, candidates, 3, MIN_MATCH_SCORE);
+        // Merge with any pre-existing proposals (from a previous scan pass
+        // via the Rescan button), keeping whichever capture scored higher
+        // for each task id.
+        const byTaskId = new Map();
+        for (const p of proposals) byTaskId.set(p.task.id, p);
+        for (const rawLine of mergedLines) {
+          const line = (rawLine || "").trim();
+          // Drop Part-N fragments that survived the merge pass — either
+          // dashed ("- Part 3") or bare ("Part 1"). These are always
+          // continuation fragments from an adjacent task-name line; on
+          // their own they'd false-match random Part-N tasks (e.g. a
+          // stray "Part 1" scoring 80% against Gunsmith – Part 1).
+          if (PART_FRAGMENT_RE.test(line)) continue;
+          const matches = findTopMatches(line, matchIndex, 3, MIN_MATCH_SCORE);
           if (matches.length === 0) continue;
           const primary = matches[0];
           const taskId = primary.item.id;
-          if (existingIds.has(taskId)) continue; // already tracked
+          if (existingIds.has(taskId)) continue; // already tracked on profile
           const prev = byTaskId.get(taskId);
           if (prev && prev.score >= primary.score) continue;
+
+          let alternates = matches.slice(1).map((m) => m.item._task);
+          const isLocationLine = LOCATION_NAMES.has(line.toLowerCase());
+          const isAmbiguousSeries = isAmbiguousPartSiblings(primary.item, alternates, line);
+          // For ambiguous numbered-series picks (OCR couldn't capture the
+          // Part number), surface every sibling in the series so the user
+          // can swap to Part 5 even when findTopMatches only returned the
+          // first three equally-scoring parts.
+          if (isAmbiguousSeries) {
+            alternates = expandSeriesAlternates(primary.item, alternates, apiTasks);
+          }
+          // Auto-check only when confidence is high AND the match isn't
+          // from a location-column leak AND isn't an ambiguous numbered-
+          // series pick. Falls back to the previous proposal's check
+          // state on re-scan so the user's toggles survive.
+          const shouldAutoCheck =
+            primary.score >= AUTO_CHECK_SCORE &&
+            !isLocationLine &&
+            !isAmbiguousSeries;
+
           byTaskId.set(taskId, {
             line,
             task: primary.item._task,
             score: primary.score,
-            checked: primary.score >= AUTO_CHECK_SCORE,
-            alternates: matches.slice(1).map((m) => m.item._task),
+            // Preserve the user's check state only if they've actually
+            // interacted with this row. Untouched proposals get the
+            // freshly-computed auto-check so rescans pick up improvements
+            // (or intentional changes) in the auto-check heuristic.
+            checked: prev?.userToggled ? prev.checked : shouldAutoCheck,
+            userToggled: prev?.userToggled ?? false,
+            alternates,
           });
         }
         const list = Array.from(byTaskId.values()).sort((a, b) => b.score - a.score);
         setProposals(list);
         setPhase("review");
+        // Audible confirmation for the Ctrl+Alt+T-from-Tarkov flow — the
+        // user is usually looking at Tarkov when this completes, so a beep
+        // tells them the capture landed without needing to Alt+Tab to
+        // verify. Countdown flow doesn't beep (user is already in-app).
+        if (scanModeRef.current === "immediate") {
+          playScanBeep();
+        }
       } catch (e) {
         if (cancelled) return;
         setError(String(e?.message || e));
@@ -84,12 +211,19 @@ export default function TaskScannerModal({ apiTasks, myProfile, saveMyProfile, o
       }
     })();
     return () => { cancelled = true; };
-  }, [phase, apiTasks, myProfile]);
+    // `proposals` intentionally not in deps — we want to read the current
+    // value when a rescan fires, but re-running the effect whenever
+    // proposals changes (every toggle) would re-trigger OCR. The phase
+    // transition back to "scanning" via rescan is what re-runs us.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, matchIndex, myProfile]);
 
   const checkedCount = useMemo(() => proposals.filter((p) => p.checked).length, [proposals]);
 
   const toggle = (idx) => {
-    setProposals((prev) => prev.map((p, i) => (i === idx ? { ...p, checked: !p.checked } : p)));
+    setProposals((prev) => prev.map((p, i) => (
+      i === idx ? { ...p, checked: !p.checked, userToggled: true } : p
+    )));
   };
   const swapAlternate = (idx, alternate) => {
     setProposals((prev) =>
@@ -99,13 +233,24 @@ export default function TaskScannerModal({ apiTasks, myProfile, saveMyProfile, o
               ...p,
               task: alternate,
               alternates: [p.task, ...p.alternates.filter((a) => a.id !== alternate.id)],
+              userToggled: true,
             }
           : p
       )
     );
   };
-  const selectAll = () => setProposals((prev) => prev.map((p) => ({ ...p, checked: true })));
-  const selectNone = () => setProposals((prev) => prev.map((p) => ({ ...p, checked: false })));
+  const selectAll = () => setProposals((prev) => prev.map((p) => ({ ...p, checked: true, userToggled: true })));
+  const selectNone = () => setProposals((prev) => prev.map((p) => ({ ...p, checked: false, userToggled: true })));
+
+  // Rescan keeps the current proposals and re-runs the capture/match pass.
+  // The scanning effect merges new matches into the existing set, so the
+  // user can scroll the notebook between scans and accumulate proposals
+  // across pages/tabs without losing anything they've already reviewed.
+  const rescan = () => {
+    setCountdown(COUNTDOWN_SECONDS);
+    setError(null);
+    setPhase("countdown");
+  };
 
   const importChecked = () => {
     const picked = proposals.filter((p) => p.checked);
@@ -271,7 +416,7 @@ export default function TaskScannerModal({ apiTasks, myProfile, saveMyProfile, o
                   }}
                 >None</button>
               </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 10 }}>
                 {proposals.map((p, idx) => (
                   <div key={p.task.id} style={{
                     background: p.checked ? T.goldBgSubtle : T.inputBg,
@@ -333,6 +478,45 @@ export default function TaskScannerModal({ apiTasks, myProfile, saveMyProfile, o
               </div>
             </>
           )}
+          {phase === "review" && rawLines.length > 0 && (
+            <div style={{ borderTop: `1px dashed ${T.border}`, paddingTop: 8, display: "flex", alignItems: "center", gap: 0 }}>
+              <button
+                onClick={() => setShowRaw((v) => !v)}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: T.textDim,
+                  fontSize: T.fs1,
+                  padding: 0,
+                  cursor: "pointer",
+                  fontFamily: T.sans,
+                  textDecoration: "underline",
+                }}
+              >
+                {showRaw ? "▾ Hide" : "▸ Show"} raw OCR ({rawLines.length} line{rawLines.length === 1 ? "" : "s"})
+              </button>
+              <Tip text="Every text line Windows OCR picked up from the screen capture, before fuzzy matching. Useful for diagnosing misses — if your task name isn't here, the capture or font is the problem; if it is but didn't match, the threshold or tokenization is." />
+            </div>
+          )}
+          {phase === "review" && showRaw && rawLines.length > 0 && (
+            <div style={{
+              marginTop: 6,
+              background: T.inputBg,
+              border: `1px solid ${T.border}`,
+              padding: "6px 8px",
+              maxHeight: 200,
+              overflowY: "auto",
+              fontFamily: T.mono,
+              fontSize: T.fs1,
+              color: T.textDim,
+              lineHeight: 1.5,
+              whiteSpace: "pre-wrap",
+            }}>
+              {rawLines.map((l, i) => (
+                <div key={i}>{l}</div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Footer */}
@@ -343,6 +527,22 @@ export default function TaskScannerModal({ apiTasks, myProfile, saveMyProfile, o
           borderTop: `1px solid ${T.border}`,
         }}>
           <div style={{ flex: 1 }} />
+          {(phase === "review" || phase === "error") && (
+            <button
+              onClick={rescan}
+              style={{
+                background: "transparent",
+                border: `1px solid ${T.border}`,
+                color: T.textDim,
+                fontSize: T.fs2,
+                padding: "6px 14px",
+                cursor: "pointer",
+                fontFamily: T.sans,
+                letterSpacing: 0.5,
+                borderRadius: T.r1,
+              }}
+            >Rescan</button>
+          )}
           <button
             onClick={onClose}
             style={{

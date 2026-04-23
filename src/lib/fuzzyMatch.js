@@ -40,13 +40,20 @@ export function tokenize(s) {
     .toLowerCase()
     .replace(/[^\w\s-]/g, " ")
     .split(/[\s-]+/)
-    .filter((t) => t.length >= 2);
+    // Keep length-≥2 tokens OR single-digit numerics. Single-letter words
+    // ("a", "i", "of") are junk; single-digit numerics disambiguate
+    // task-name series like "Tarkov Shooter - Part 1" vs "Part 4", which
+    // otherwise collapse to identical [tarkov, shooter, part] token sets
+    // and tie on tokenScore.
+    .filter((t) => t.length >= 2 || /^\d$/.test(t));
 }
 
 // Token-level score: for each query token, find its best match among the
-// candidate's tokens. Rewards coverage (more tokens matched) and average
-// per-token similarity. Handles partial captures like "can stew" → "Can of
-// beef stew" where plain Levenshtein on the full string fails.
+// candidate's tokens. Rewards BIDIRECTIONAL coverage — both query tokens
+// explained by candidate and candidate tokens explained by query — so that
+// short queries can't ride on partial candidates ("Lighthouse" scoring 96%
+// against "Revision – Lighthouse"). Handles partial captures like "can stew"
+// → "Can of beef stew" where plain Levenshtein on the full string fails.
 //
 // Substring-contains bonus only fires when the shorter token is ≥4 chars —
 // otherwise "ak" matches "lucky", "flak", "knack" and floods the scorer.
@@ -57,26 +64,34 @@ function tokenScore(queryTokens, candTokens) {
 
   let total = 0;
   let matched = 0;
+  const candMatched = new Set();
   for (const qt of queryTokens) {
     let best = 0;
-    for (const ct of candTokens) {
+    let bestIdx = -1;
+    for (let ci = 0; ci < candTokens.length; ci++) {
+      const ct = candTokens[ci];
       const shorter = qt.length < ct.length ? qt : ct;
       const longer = qt.length < ct.length ? ct : qt;
       const sub = shorter.length >= 4 && longer.includes(shorter) ? 0.1 : 0;
       const s = Math.min(1, similarity(qt, ct) + sub);
-      if (s > best) best = s;
+      if (s > best) { best = s; bestIdx = ci; }
     }
     total += best;
-    if (best >= 0.8) matched++;
+    if (best >= 0.8) {
+      matched++;
+      if (bestIdx >= 0) candMatched.add(bestIdx);
+    }
   }
 
   const avg = total / queryTokens.length;
-  const coverage = matched / queryTokens.length;
-  // Penalty for extra candidate tokens not explained by the query, so
-  // "AK-74" doesn't tie "AK-74N scope rail"
-  const extras = Math.max(0, candTokens.length - queryTokens.length);
-  const lengthPenalty = Math.min(0.15, extras * 0.04);
-  return avg * 0.4 + coverage * 0.6 - lengthPenalty;
+  const qCoverage = matched / queryTokens.length;
+  const cCoverage = candMatched.size / candTokens.length;
+  // Min-coverage across both directions: a 1-of-2-tokens match scores 0.5,
+  // not the old 1.0-minus-small-penalty. Replaces the old capped `extras`
+  // penalty which only docked 15% max — not enough to stop the task
+  // scanner's location-column leakage.
+  const bidiCoverage = Math.min(qCoverage, cCoverage);
+  return avg * 0.4 + bidiCoverage * 0.6;
 }
 
 /**

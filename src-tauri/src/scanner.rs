@@ -209,8 +209,10 @@ pub fn ocr_full_screen() -> Result<Vec<String>, String> {
         .map_err(|e| format!("Screen capture failed: {e}"))?;
     let (width, height) = capture.dimensions();
     let rgba = capture.into_raw();
+    debug_dump_rgba("fullscreen", &rgba, width, height);
 
     let (processed, pw, ph) = preprocess(&rgba, width, height, 1);
+    debug_dump_rgba("fullscreen-processed", &processed, pw, ph);
     let lines = ocr_lines(&processed, pw, ph).map_err(|e| format!("OCR failed: {e}"))?;
     Ok(lines)
 }

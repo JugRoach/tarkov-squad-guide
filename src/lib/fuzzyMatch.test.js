@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildMatchIndex, prepQuery, scoreItem, scoreItemBest, findBestMatch, tokenize } from "./fuzzyMatch.js";
+import { buildMatchIndex, prepQuery, scoreItem, scoreItemBest, findBestMatch, findTopMatches, tokenize } from "./fuzzyMatch.js";
 
 // Minimal fixtures mirroring real tarkov.dev rows for the items involved in
 // the scanner-mismatch bugs we've hit in the wild.
@@ -142,5 +142,95 @@ describe("findBestMatch — regression cases", () => {
     const index = buildMatchIndex(SPLINT_ITEMS);
     const m = findBestMatch("splint", index);
     expect(m?.item?.id).toBe("immobilizing");
+  });
+});
+
+describe("task scanner — location-column leakage regressions", () => {
+  // Tarkov's task notebook shows a Location column ("Reserve", "Lighthouse",
+  // "Factory", "Streets of Tarkov", "Customs", ...) next to each task name.
+  // Full-screen OCR happily reads those as standalone lines. Before the
+  // bidirectional-coverage fix, a 1-token query covering 1-of-2 candidate
+  // tokens scored 96%, producing spurious "Revision – Lighthouse" /
+  // "Rough Tarkov" / "Huntsman Path – Factory Chief" proposals.
+  const REVISION_TASKS = [
+    { id: "rev-house",   name: "Revision – Lighthouse" },
+    { id: "rev-streets", name: "Revision – Streets of Tarkov" },
+  ];
+  const FRAGMENT_TASKS = [
+    { id: "rough",    name: "Rough Tarkov" },
+    { id: "huntsman", name: "The Huntsman Path – Factory Chief" },
+    { id: "back",     name: "Back Door" },
+  ];
+
+  it("rejects single-token location queries at 0.75 threshold", () => {
+    const index = buildMatchIndex(REVISION_TASKS);
+    const m = findTopMatches("Lighthouse", index, 3, 0.75);
+    expect(m).toHaveLength(0);
+  });
+
+  it("rejects 'Tarkov' alone from matching 'Rough Tarkov' above threshold", () => {
+    const index = buildMatchIndex(FRAGMENT_TASKS);
+    const m = findTopMatches("Tarkov", index, 3, 0.75);
+    expect(m).toHaveLength(0);
+  });
+
+  it("rejects 'Factory' alone from matching 'Huntsman Path – Factory Chief'", () => {
+    const index = buildMatchIndex(FRAGMENT_TASKS);
+    const m = findTopMatches("Factory", index, 3, 0.75);
+    expect(m).toHaveLength(0);
+  });
+
+  it("rejects 'Streets of' fragment (OCR truncated 'Streets of Tarkov' location)", () => {
+    const index = buildMatchIndex(REVISION_TASKS);
+    const m = findTopMatches("Streets of", index, 3, 0.75);
+    // Without bidi coverage this scored 0.92; with it, 2-of-4-cand-tokens
+    // matched → cCov 0.5 → ~0.70, below threshold.
+    expect(m).toHaveLength(0);
+  });
+
+  it("still matches the full task name cleanly", () => {
+    const index = buildMatchIndex(REVISION_TASKS);
+    const m = findTopMatches("Revision – Lighthouse", index, 3, 0.75);
+    expect(m.length).toBeGreaterThan(0);
+    expect(m[0].item.id).toBe("rev-house");
+  });
+});
+
+describe("task-name numeric disambiguation", () => {
+  // Tarkov has many numbered task series — Gunsmith 1-25, Farming 1-4,
+  // Tarkov Shooter 1-8, Survivalist 1-6, etc. Task names look like
+  // "Tarkov Shooter - Part 1". When the length-≥2 token filter dropped
+  // single-digit tokens these all collapsed to [tarkov, shooter, part]
+  // and tied on tokenScore, so the first-iterated series-entry won.
+  const SERIES_TASKS = [
+    { id: "shooter1", name: "Tarkov Shooter - Part 1" },
+    { id: "shooter4", name: "Tarkov Shooter - Part 4" },
+    { id: "shooter8", name: "Tarkov Shooter - Part 8" },
+  ];
+
+  it("tokenize preserves single-digit numerics", () => {
+    expect(tokenize("Tarkov Shooter - Part 1")).toEqual(["tarkov", "shooter", "part", "1"]);
+    expect(tokenize("Tarkov Shooter - Part 4")).toEqual(["tarkov", "shooter", "part", "4"]);
+    // Still filters single-letter junk
+    expect(tokenize("a task of the traders")).toEqual(["task", "of", "the", "traders"]);
+  });
+
+  it("findTopMatches picks the right Part number", () => {
+    const index = buildMatchIndex(SERIES_TASKS);
+    const m4 = findTopMatches("Tarkov Shooter Part 4", index, 3, 0.4);
+    expect(m4[0].item.id).toBe("shooter4");
+    const m1 = findTopMatches("Tarkov Shooter Part 1", index, 3, 0.4);
+    expect(m1[0].item.id).toBe("shooter1");
+  });
+
+  it("findBestMatch disambiguates Gunsmith parts", () => {
+    const gunsmith = [
+      { id: "gs1",  name: "Gunsmith - Part 1" },
+      { id: "gs10", name: "Gunsmith - Part 10" },
+      { id: "gs17", name: "Gunsmith - Part 17" },
+    ];
+    const index = buildMatchIndex(gunsmith);
+    expect(findBestMatch("Gunsmith Part 1", index)?.item?.id).toBe("gs1");
+    expect(findBestMatch("Gunsmith Part 17", index)?.item?.id).toBe("gs17");
   });
 });

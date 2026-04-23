@@ -52,6 +52,13 @@ function DesktopAppInner() {
   const [searchQ, setSearchQ] = useState("");
   const [apiRetry, setApiRetry] = useState(0);
   const [taskScannerOpen, setTaskScannerOpen] = useState(false);
+  // `scanMode` controls whether the modal starts with a countdown (user in
+  // the app) or goes straight to scanning silently (user in Tarkov). The
+  // `scanTrigger` counter lets the Rust shortcut fire multiple scans per
+  // session — each bump tells the modal to re-run, merging new proposals
+  // into the existing list without losing user toggles.
+  const [scanMode, setScanMode] = useState("countdown");
+  const [scanTrigger, setScanTrigger] = useState(0);
   const updater = useUpdater({ autoCheck: true });
 
   // Auto-sync profile to Supabase — survives localStorage wipes and app
@@ -64,15 +71,29 @@ function DesktopAppInner() {
     if (profileReady && !welcomed) setShowWelcome(true);
   }, [profileReady, welcomed]);
 
-  // Ctrl+Alt+T triggers the global shortcut in Rust, which emits this
-  // event back to the main window. We just open the scanner modal; the
-  // modal does its own countdown + OCR trigger.
+  // Rust's Ctrl+Alt+T handler decides which event to emit based on main-
+  // window focus: `task-scan-start` when focused (user in app → countdown)
+  // and `task-scan-immediate` when not (user in Tarkov → silent capture).
+  // Each event bumps `scanTrigger` so the modal re-runs its scan effect
+  // whether it's closed, open in review, or mid-scan.
   useEffect(() => {
-    let unlisten;
+    let unlistenStart, unlistenImmediate;
     (async () => {
-      unlisten = await tauriListen("task-scan-start", () => setTaskScannerOpen(true));
+      unlistenStart = await tauriListen("task-scan-start", () => {
+        setScanMode("countdown");
+        setScanTrigger((t) => t + 1);
+        setTaskScannerOpen(true);
+      });
+      unlistenImmediate = await tauriListen("task-scan-immediate", () => {
+        setScanMode("immediate");
+        setScanTrigger((t) => t + 1);
+        setTaskScannerOpen(true);
+      });
     })();
-    return () => { if (typeof unlisten === "function") unlisten(); };
+    return () => {
+      if (typeof unlistenStart === "function") unlistenStart();
+      if (typeof unlistenImmediate === "function") unlistenImmediate();
+    };
   }, []);
 
   // Fetch API data (re-runs when apiRetry bumps)
@@ -473,7 +494,11 @@ function DesktopAppInner() {
                 saveMyProfile={saveMyProfile}
                 setTab={setTab}
                 apiTasks={apiTasks}
-                onOpenTaskScanner={() => setTaskScannerOpen(true)}
+                onOpenTaskScanner={() => {
+                  setScanMode("countdown");
+                  setScanTrigger((t) => t + 1);
+                  setTaskScannerOpen(true);
+                }}
               />
             )}
           </div>
@@ -485,6 +510,8 @@ function DesktopAppInner() {
             apiTasks={apiTasks}
             myProfile={myProfile}
             saveMyProfile={saveMyProfile}
+            scanMode={scanMode}
+            scanTrigger={scanTrigger}
             onClose={() => setTaskScannerOpen(false)}
           />
         </Suspense>
