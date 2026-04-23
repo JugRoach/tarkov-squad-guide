@@ -35,7 +35,7 @@ function similarity(a, b) {
   return 1 - dist / maxLen;
 }
 
-function tokenize(s) {
+export function tokenize(s) {
   return (s || "")
     .toLowerCase()
     .replace(/[^\w\s-]/g, " ")
@@ -119,6 +119,28 @@ export function scoreItem(prepared, row) {
   const nScore = nameScore + nameContains;
   const tScore = tokenScore(tokens, row.tokens);
   return Math.max(sScore, nScore, tScore);
+}
+
+/**
+ * Score an item against a ranked list of prepared queries, returning the
+ * best score. Queries are assumed ordered most-trusted first (primary OCR
+ * = closest-to-cursor, fallbacks trailing). A small per-rank penalty is
+ * applied to non-primary queries so that exact-match ties resolve in favor
+ * of the primary query.
+ *
+ * Without this: hovering "Alu splint" produces candidates ["Alu splint",
+ * "alu", "splint"]. The 2-word phrase exact-matches the Alu splint item's
+ * shortName at 1.15; the single word "splint" also exact-matches the
+ * Immobilizing splint item's shortName at 1.15. Taking max alone ties
+ * both items and the first-iterated wins arbitrarily.
+ */
+export function scoreItemBest(preparedQueries, row, rankPenalty = 0.05) {
+  let best = 0;
+  for (let qi = 0; qi < preparedQueries.length; qi++) {
+    const s = scoreItem(preparedQueries[qi], row) - qi * rankPenalty;
+    if (s > best) best = s;
+  }
+  return best;
 }
 
 function normalizeIndex(indexOrItems) {

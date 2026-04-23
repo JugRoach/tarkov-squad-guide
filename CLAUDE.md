@@ -146,6 +146,13 @@ on the `JugRoach/tarkov-planner` repo. Release pipeline is
 - `desktop:build` — `tauri build` (produces installer)
 - `test` / `test:watch` — Vitest (ESLint v9 flat config)
 - `lint` — `eslint src/`
+- `precompute` — regenerate `src/data/precomputed-builds.json` (all-weapons
+  build optimizer). Run after balance patches or optimizer scoring changes.
+- `precompute-icons` — regenerate `src/data/icon-index-v1.bin` (dHash
+  index for the scanner). Uses `@napi-rs/canvas` (Skia) so hashes align
+  with the browser canvas pipeline. Regenerate on release cycles or when
+  tarkov.dev icon artwork changes. `useIconIndex` delta-downloads new
+  items at runtime, so a stale bundle is self-healing for additions.
 
 ---
 
@@ -159,9 +166,12 @@ version numbers in the tree at the tagged commit, not from the tag name.
    - `src-tauri/tauri.conf.json` (`version`)
    - `src-tauri/Cargo.toml` (`[package] version`)
    - `src-tauri/Cargo.lock` (run `cargo check` to refresh)
-2. Commit: `release: v0.X.Y`
-3. `git tag v0.X.Y && git push --tags`
-4. CI in `.github/workflows/release.yml` produces `latest.json` + the
+2. Regenerate precomputes if relevant:
+   - `npm run precompute` — after optimizer/balance changes.
+   - `npm run precompute-icons` — periodically (bundled dHash index).
+3. Commit: `release: v0.X.Y`
+4. `git tag v0.X.Y && git push --tags`
+5. CI in `.github/workflows/release.yml` produces `latest.json` + the
    MSI/NSIS installers + the updater `.sig` file.
 
 ---

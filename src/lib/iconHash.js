@@ -153,6 +153,24 @@ export function findTopK(queryHash, index, K = 5) {
 }
 
 /**
+ * Load the Tauri HTTP plugin's fetch when running in Tauri. Browser fetch
+ * is blocked by CORS for assets.tarkov.dev (no Access-Control-Allow-Origin
+ * header), which silently fails every icon download. The plugin's fetch
+ * routes through Rust and bypasses browser CORS entirely. Falls back to
+ * window.fetch in the hosted web build (where the origin check isn't
+ * cross-origin the same way, and CORS fails are at least visible).
+ */
+async function resolveFetch() {
+  if (!window.__TAURI_INTERNALS__) return window.fetch.bind(window);
+  try {
+    const mod = await import("@tauri-apps/plugin-http");
+    return mod.fetch;
+  } catch (_) {
+    return window.fetch.bind(window);
+  }
+}
+
+/**
  * Build the icon hash index from a list of items with gridImageLink.
  * Downloads each icon, hashes it, returns array of { item, hash }.
  * Calls onProgress(done, total) every batch.
@@ -161,13 +179,14 @@ export async function buildIconIndex(items, { concurrency = 8, onProgress } = {}
   const withIcons = items.filter((i) => i.gridImageLink && i.id);
   const index = [];
   let done = 0;
+  const fetchImpl = await resolveFetch();
   const workers = new Array(concurrency).fill(null).map(async () => {
     while (true) {
       const i = done++;
       if (i >= withIcons.length) return;
       const item = withIcons[i];
       try {
-        const resp = await fetch(item.gridImageLink);
+        const resp = await fetchImpl(item.gridImageLink);
         if (!resp.ok) continue;
         const blob = await resp.blob();
         const bitmap = await createImageBitmap(blob);

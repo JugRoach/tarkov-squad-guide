@@ -17,6 +17,13 @@
     "core:window:allow-set-ignore-cursor-events",
     "core:event:default",
     "updater:default",
-    "process:default"
+    "process:default",
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "https://assets.tarkov.dev/*" },
+        { "url": "https://api.tarkov.dev/*" }
+      ]
+    }
   ]
 }

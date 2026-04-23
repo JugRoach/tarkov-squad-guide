@@ -39,7 +39,7 @@ function useProfileSettings() {
 export default function ScannerPopout() {
   // Popout shares localStorage with the main window, so the icon index
   // built there is reused here without a re-download.
-  const { index: iconIndex, status: iconStatus, progress: iconProgress } = useIconIndex({ autoBuild: true });
+  const { index: iconIndex, status: iconStatus, progress: iconProgress, rebuild: rebuildIcons } = useIconIndex({ autoBuild: true });
   const { scanning, scanStatus, item, dbLoading, toggleScanning } = useScanAndFetch({ autoStart: true, iconIndex });
   const { threshold, pmcLevel } = useProfileSettings();
 
@@ -124,8 +124,37 @@ export default function ScannerPopout() {
             ? "Loading..."
             : iconStatus === "building"
               ? `Icons ${iconProgress.done}/${iconProgress.total}`
-              : scanStatus || (scanning ? "Scanning..." : "Paused")}
+              : iconStatus === "loading"
+                ? "Fetching item list..."
+                : iconStatus === "error"
+                  ? "Icons failed — click ⟳ to retry"
+                  : scanStatus || (scanning ? "Scanning..." : "Paused")}
         </div>
+        {/* Rebuild trigger — visible whenever dHash can't run (icons not
+            loaded), regardless of the reason. dHash-based matching is
+            dead without icons; without a visible control the only
+            recovery is editing localStorage. */}
+        {!iconIndex?.length && iconStatus !== "building" && iconStatus !== "loading" && (
+          <button
+            onClick={rebuildIcons}
+            title={`Rebuild icon index (status: ${iconStatus})`}
+            style={{
+              background: iconStatus === "error" ? "rgba(200,80,80,0.12)" : "rgba(210,175,120,0.06)",
+              border: `1px solid ${iconStatus === "error" ? T.error : T.border}`,
+              color: iconStatus === "error" ? T.error : T.textDim,
+              padding: "0 7px",
+              fontSize: T.fs1,
+              fontFamily: T.sans,
+              cursor: "pointer",
+              borderRadius: T.r1,
+              whiteSpace: "nowrap",
+              flexShrink: 0,
+              lineHeight: 1.6,
+            }}
+          >
+            ⟳
+          </button>
+        )}
       </div>
 
       {/* Item result — low-profile. Left-edge border color is the primary

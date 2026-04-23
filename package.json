@@ -1,6 +1,6 @@
 {
   "name": "tarkov-planner",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,11 +13,13 @@
     "desktop": "tauri dev",
     "desktop:build": "tauri build",
     "tauri": "tauri",
-    "precompute": "node scripts/precompute-builds.mjs"
+    "precompute": "node scripts/precompute-builds.mjs",
+    "precompute-icons": "node scripts/precompute-icons.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.99.3",
     "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/plugin-http": "^2.5.8",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "leaflet": "^1.9.4",
@@ -26,6 +28,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
+    "@napi-rs/canvas": "^0.1.99",
     "@resvg/resvg-js": "^2.6.2",
     "@tauri-apps/cli": "^2.10.1",
     "@vitejs/plugin-react": "^4.2.0",

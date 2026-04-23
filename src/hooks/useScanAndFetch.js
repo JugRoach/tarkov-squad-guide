@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { findBestMatch, buildMatchIndex, prepQuery, scoreItem } from "../lib/fuzzyMatch.js";
+import { findBestMatch, buildMatchIndex, prepQuery, scoreItem, scoreItemBest, tokenize } from "../lib/fuzzyMatch.js";
 import { dhashFromRgba, findTopK, toneMapRgba, hammingDistance } from "../lib/iconHash.js";
 import { API_URL } from "../constants.js";
 
@@ -95,6 +95,12 @@ export function useScanAndFetch({ autoStart = false, onPrice, iconIndex = null }
   const runScanRef = useRef(null);
   const toggleRef = useRef(null);
   const mountedRef = useRef(true);
+  // Sticky verify correction — holds the last tooltip-verified item so the
+  // popout stops flip-flopping between fast-scan's wrong pick and the
+  // corrected verify pick on alternating ticks. Cleared when the cursor
+  // moves to a different tile (detected via capture.tile rect).
+  const verifiedCacheRef = useRef(null); // { fastItemId, verifiedItem }
+  const lastTileRectRef = useRef(null);
 
   useEffect(() => { onPriceRef.current = onPrice; }, [onPrice]);
   useEffect(() => { iconIndexRef.current = iconIndex; }, [iconIndex]);
@@ -136,14 +142,22 @@ export function useScanAndFetch({ autoStart = false, onPrice, iconIndex = null }
       // Run OCR + raw-pixel capture in parallel. dHash handles the
       // tooltip-overlay case where OCR sees descriptive text instead of
       // the tile label; OCR still disambiguates ammo variants that hash
-      // identically. Every 4th scan (~1 Hz) also runs the wide tooltip
+      // identically. Every 2nd scan (~2 Hz) also runs the wide tooltip
       // OCR pass for "verify against the full item name" — confirms or
       // corrects the fast-scan pick once the game tooltip has appeared.
+      // Cadence raised from 4th to 2nd tick because the fast-scan OCR
+      // regularly picks the wrong sibling (e.g. "Splint" over "Alu splint")
+      // when the tile label's distinguishing token is short or missed; the
+      // tooltip line carries the full name and is the only signal that
+      // corrects reliably.
       const iconIdx = iconIndexRef.current;
-      const runTooltip = (scanCounterRef.current++ % 4) === 0;
+      const runTooltip = (scanCounterRef.current++ % 2) === 0;
+      // capture always runs — even without an icon index the cursor/tile
+      // coordinates are useful for hover-change detection and future
+      // fingerprinting. dHash scoring below is still gated on iconIdx.
       const [lines, capture, tooltipLines] = await Promise.all([
         invoke("scan_at_cursor").catch(() => null),
-        iconIdx ? invoke("capture_rgba_at_cursor").catch(() => null) : Promise.resolve(null),
+        invoke("capture_rgba_at_cursor").catch(() => null),
         runTooltip ? invoke("ocr_tooltip_region").catch(() => null) : Promise.resolve(null),
       ]);
 
@@ -154,6 +168,10 @@ export function useScanAndFetch({ autoStart = false, onPrice, iconIndex = null }
         let label = first;
         if (first === "__NO_OCR__") label = "No text read at cursor";
         else if (first === "__NO_TILE__") label = "Not hovering a tile";
+        // Cursor is off any tile — drop the sticky verify correction so it
+        // can't re-apply to a different tile the user hovers next.
+        verifiedCacheRef.current = null;
+        lastTileRectRef.current = null;
         setScanStatus(label);
         return;
       }
@@ -202,6 +220,12 @@ export function useScanAndFetch({ autoStart = false, onPrice, iconIndex = null }
 
       // --- Query hash from captured tile
       let queryHash = null;
+      // Diagnostic: surface why dHash couldn't run. Shown in scan status
+      // so we can tell combined-scoring (with icon signal) from OCR-only
+      // fallback at a glance.
+      let dhashSkipReason = null;
+      if (!capture?.rgba) dhashSkipReason = "no-capture";
+      else if (!iconIdx?.length) dhashSkipReason = "no-icons";
       if (capture?.rgba && iconIdx?.length) {
         const rgbaU8 = new Uint8Array(capture.rgba);
         // Prefer the Rust-detected tile rect (preserves aspect ratio for
@@ -250,13 +274,11 @@ export function useScanAndFetch({ autoStart = false, onPrice, iconIndex = null }
           const mRow = matchById.get(row.item.id);
           const dist = hammingDistance(queryHash, row.hash);
           const iconScore = Math.max(0, 1 - dist / ICON_SATURATE_DIST);
-          let ocrScore = 0;
-          if (mRow) {
-            for (const pq of preparedQueries) {
-              const s = scoreItem(pq, mRow);
-              if (s > ocrScore) ocrScore = s;
-            }
-          }
+          // scoreItemBest applies a small rank penalty to non-primary
+          // queries so exact-match ties resolve in favor of the closest-
+          // to-cursor OCR — otherwise "Alu splint" and "Splint" both
+          // exact-match at 1.15 and the first-iterated item wins.
+          const ocrScore = mRow ? scoreItemBest(preparedQueries, mRow) : 0;
           const combined = iconScore + ocrScore;
           if (!best || combined > best.combined) {
             best = { item: mRow?.item || row.item, dist, iconScore, ocrScore, combined };
@@ -287,12 +309,13 @@ export function useScanAndFetch({ autoStart = false, onPrice, iconIndex = null }
       //      must appear *somewhere* in the tooltip capture. Cross-item
       //      leakage still puts both items' tokens in the bag, so this
       //      alone can't solve it.
-      //   2. shortName agreement — the verified item's shortName must
-      //      match the fast-scan combined pick's shortName. The tile
-      //      label OCR is reliable (it's the closest-to-cursor text and
-      //      high-contrast), so combined's shortName is our ground truth
-      //      for which *category* the cursor is on. Verify refines
-      //      within that category (sibling disambiguation).
+      //   2. shortName affinity — candidate must either share the fast-
+      //      scan pick's shortName OR contain one of its substantive
+      //      (≥4 char) short tokens in the candidate's own name tokens.
+      //      This lets "Aluminum splint" rescue a fast-scan pick of the
+      //      generic "Splint" (name has "splint"), while still blocking
+      //      unrelated leakage like "Army cap" → "Army bandage" (names
+      //      share no substantive token with "A Cap" or "A Bandage").
       let verified = null;
       const tooltipBag = new Set();
       for (const tq of tooltipQueries) {
@@ -300,12 +323,23 @@ export function useScanAndFetch({ autoStart = false, onPrice, iconIndex = null }
       }
       if (tooltipBag.size >= 2 && tooltipQueries.length && matchIndexRef.current && best?.item) {
         const categoryShortName = best.item.shortName;
+        const pickShortTokens = tokenize(categoryShortName).filter((t) => t.length >= 4);
         const candidateMap = new Map(); // itemId -> best {item, score}
         for (const tq of tooltipQueries) {
           for (const row of matchIndexRef.current) {
-            // Only consider items in the same shortName family as the
-            // fast-scan pick — prevents cross-category override.
-            if (row.item.shortName !== categoryShortName) continue;
+            // Affinity gate: same shortName passes outright; otherwise the
+            // candidate's name tokens must contain at least one substantive
+            // short token from the fast-scan pick. No substantive tokens
+            // (e.g. pick short is just "UV" or "AK") → fall back to strict
+            // same-shortName check.
+            if (row.item.shortName !== categoryShortName) {
+              if (!pickShortTokens.length) continue;
+              let shares = false;
+              for (const t of pickShortTokens) {
+                if (row.tokens.includes(t)) { shares = true; break; }
+              }
+              if (!shares) continue;
+            }
             // Subset: every token of the item's full name must appear
             // in the captured tooltip text. Ensures the tooltip actually
             // said this item's name somewhere.
@@ -334,6 +368,45 @@ export function useScanAndFetch({ autoStart = false, onPrice, iconIndex = null }
         }
       }
 
+      // --- Sticky verify correction
+      // Without this, the popout flip-flops: verify-tick fires and promotes
+      // Alu splint → display updates. Next non-verify tick, fast-scan picks
+      // the wrong sibling (Splint) again → display reverts. Repeat at 4Hz.
+      //
+      // Cache rule: when a verify tick corrects fast-scan (verified.item !=
+      // best.item), remember the (fast → verified) mapping. On subsequent
+      // non-verify ticks where fast-scan picks the SAME wrong item AND the
+      // cursor hasn't moved to a new tile, keep applying the correction.
+      // Only clear the sticky cache on POSITIVE evidence of hover change —
+      // tile rect moved significantly vs last seen. A null tile on this
+      // tick is NOT enough: detect_highlighted_tile flickers between
+      // parallel captures, and clearing the cache on every flicker wipes
+      // the correction before it can stick. The __NO_TILE__ branch higher
+      // up handles the "cursor genuinely off tile" case separately by
+      // returning before we reach this code.
+      const currentTile = capture?.tile;
+      if (currentTile && lastTileRectRef.current) {
+        const prev = lastTileRectRef.current;
+        const moved =
+          Math.abs(currentTile.x - prev.x) > 5 || Math.abs(currentTile.y - prev.y) > 5;
+        if (moved) verifiedCacheRef.current = null;
+      }
+      if (currentTile) lastTileRectRef.current = currentTile;
+
+      if (verified && best?.item && verified.item.id !== best.item.id) {
+        verifiedCacheRef.current = {
+          fastItemId: best.item.id,
+          verifiedItem: verified.item,
+        };
+      } else if (!verified && best?.item && verifiedCacheRef.current) {
+        const c = verifiedCacheRef.current;
+        if (c.fastItemId === best.item.id) {
+          // Apply the cached correction. Use a sentinel score of 0 so any
+          // downstream checks that care about confidence don't gate on it.
+          verified = { item: c.verifiedItem, score: 0 };
+        }
+      }
+
       let chosen = null, source = null, statusText = null;
       if (verified) {
         chosen = verified.item;
@@ -351,7 +424,8 @@ export function useScanAndFetch({ autoStart = false, onPrice, iconIndex = null }
           statusText = `${chosen.shortName} (icon d=${best.dist})`;
         } else {
           source = "ocr";
-          statusText = `${chosen.shortName} (ocr ${Math.round(best.ocrScore * 100)}%)`;
+          const suffix = dhashSkipReason ? `, ${dhashSkipReason}` : "";
+          statusText = `${chosen.shortName} (ocr ${Math.round(best.ocrScore * 100)}%${suffix})`;
         }
         // Reject low-confidence results — saves us from spurious matches
         // when neither OCR nor dHash see anything real (e.g. cursor on
