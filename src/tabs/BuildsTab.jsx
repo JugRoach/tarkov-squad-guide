@@ -3,10 +3,17 @@ import { T } from '../theme.js';
 import { SL, Badge, Btn, Tip } from '../components/ui/index.js';
 import { fetchAPI, WEAPONS_LIST_Q, weaponDetailQ } from '../api.js';
 import { encodeBuild, decodeBuild } from '../lib/shareCodes.js';
-import { optimizeBuild } from '../lib/buildOptimizer.js';
+import { optimizeBuild, computeTotalErgo, computeTotalRecoil } from '../lib/buildOptimizer.js';
 import { calcStats, getCheapestPrice } from '../lib/buildStats.js';
 import { isAvailableForProfile } from '../lib/availability.js';
 import { useCopyToClipboard } from '../hooks/useCopyToClipboard.js';
+import { useStorage } from '../hooks/useStorage.js';
+import { useDebouncedValue } from '../hooks/useDebounce.js';
+
+// Slot nameIds the optimizer skips by default — must match
+// DEFAULT_SKIP in buildOptimizer.js. Used here to grey out the lock
+// toggle for slots whose pick is already implicitly preserved.
+const IMPLICIT_SKIP_RX = /scope|sight|magazine/i;
 
 // Turn tarkov.dev caliber strings into readable labels:
 //   "Caliber556x45NATO" → "5.56x45 NATO"
@@ -73,8 +80,23 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
   const [importCode, setImportCode] = useState("");
   const [importError, setImportError] = useState("");
   const { copied, copy } = useCopyToClipboard(); // `copied` = build id that was just copied
-  const [gameMode, setGameMode] = useState("pve"); // "pve" | "regular"
+  const [gameMode, setGameMode] = useStorage("tg-builds-gamemode-v1", "pve"); // persists across tab switches
   const [modSort, setModSort] = useState("name"); // "name" | "price" | "ergo" | "recoil"
+  const [modSearch, setModSearch] = useState(""); // search filter inside the mod picker
+  // Per-build lock + custom-target state. Persisted with the saved build,
+  // not in the share code. Default: empty locks, zero targets — preserves
+  // legacy behavior (scope/sight/mag still implicitly skipped via the
+  // optimizer's DEFAULT_SKIP regex).
+  const [lockedPaths, setLockedPaths] = useState(new Set()); // Set<path>
+  const [opMode, setOpMode] = useState("balanced"); // "ergo" | "recoil" | "balanced" | "custom"
+  const [customTargets, setCustomTargets] = useState({ e: 0, r: 0 });
+  const [maxStats, setMaxStats] = useState({ e: 0, r: 0 });
+  // Pareto frontier of (E, R) points for the current weapon+locks. Used
+  // by the CUSTOM-mode mini chart so the user can see the trade-off
+  // curve their targets are sliding along.
+  const [frontier, setFrontier] = useState([]);
+  // Debounce slider drags so we don't run the optimizer on every pixel of movement.
+  const debouncedTargets = useDebouncedValue(customTargets, 200);
 
   // Lazy load weapon list on first mount
   useEffect(() => {
@@ -112,6 +134,86 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
       setLeaderboardCaliber(calibers[0]);
     }
   }, [calibers, leaderboardCaliber]);
+
+  // Compute slider-range maximums (E_max, R_max) for the editor's CUSTOM
+  // mode. "Max" is constrained by the user's locks — slider can't promise
+  // values that aren't reachable given the locked picks.
+  useEffect(() => {
+    if (!selectedWeapon) return;
+    const opts = { currentMods: mods, lockedPaths };
+    try {
+      const ergoMods = optimizeBuild(selectedWeapon, "ergo", opts);
+      const recoilMods = optimizeBuild(selectedWeapon, "recoil", opts);
+      setMaxStats({
+        e: Math.round(computeTotalErgo(selectedWeapon, ergoMods)),
+        r: Math.round(computeTotalRecoil(selectedWeapon, recoilMods)),
+      });
+    } catch {
+      // Optimizer is pure-function. If it throws, leave maxStats unchanged
+      // so the CUSTOM sliders stay in their disabled "computing…" state.
+    }
+    // Intentionally exclude `mods` from deps — re-run only when the weapon
+    // or the lock set changes. Manual mod edits shouldn't recompute the
+    // theoretical max. lockedPaths reference identity changes when the user
+    // toggles a lock, which is what triggers a recompute.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedWeapon?.id, lockedPaths, gameMode]);
+
+  // CUSTOM mode auto-run: any change to debounced targets (or locks)
+  // re-runs the dual-floor optimizer and overwrites `mods`. Manual mod
+  // edits don't trigger this (mods isn't in deps).
+  useEffect(() => {
+    if (opMode !== "custom" || !selectedWeapon) return;
+    try {
+      const newMods = optimizeBuild(selectedWeapon, "custom", {
+        currentMods: mods,
+        lockedPaths,
+        ergoTarget: debouncedTargets.e,
+        recoilTarget: debouncedTargets.r,
+      });
+      setMods(newMods);
+    } catch {
+      // Optimizer error — keep current mods. UI continues to function.
+    }
+    // opMode intentionally excluded: clicking CUSTOM in `runMode` runs the
+    // optimizer directly, so this effect only handles slider/lock changes
+    // *while already in* CUSTOM. Including opMode would double-fire.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedTargets.e, debouncedTargets.r, lockedPaths, selectedWeapon?.id]);
+
+  // Pareto frontier compute: only when CUSTOM is active. Sweep the ergo
+  // axis at ~8 sample points, run the optimizer, dedupe and sort. The
+  // frontier is stable for a given weapon+locks; targets don't affect
+  // it. ~80–800ms total depending on weapon complexity.
+  useEffect(() => {
+    if (opMode !== "custom" || !selectedWeapon) return;
+    if (!maxStats.e) return;
+    const N = 8;
+    const points = [];
+    const seen = new Set();
+    for (let i = 0; i <= N; i++) {
+      const eFloor = Math.round((i / N) * maxStats.e);
+      try {
+        const result = optimizeBuild(selectedWeapon, "custom", {
+          currentMods: mods,
+          lockedPaths,
+          ergoTarget: eFloor,
+          recoilTarget: 0,
+        });
+        const e = Math.round(computeTotalErgo(selectedWeapon, result));
+        const r = Math.round(computeTotalRecoil(selectedWeapon, result));
+        const k = `${e},${r}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        points.push({ e, r });
+      } catch {
+        // skip
+      }
+    }
+    points.sort((a, b) => a.e - b.e);
+    setFrontier(points);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opMode, lockedPaths, selectedWeapon?.id, maxStats.e, maxStats.r]);
 
   // Leaderboard: fetch every weapon detail for the selected caliber in
   // parallel, optimize + compute stats, and commit the full row set in a
@@ -170,7 +272,15 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
     setWeaponLoading(true);
     try {
       const d = await fetchAPI(weaponDetailQ(weaponId, gameMode));
-      if (d?.item) { setSelectedWeapon(d.item); setMods({}); setBuildName(""); setScreen("edit"); }
+      if (d?.item) {
+        setSelectedWeapon(d.item);
+        setMods({});
+        setLockedPaths(new Set());
+        setCustomTargets({ e: 0, r: 0 });
+        setOpMode("balanced");
+        setBuildName("");
+        setScreen("edit");
+      }
     } catch(e) {}
     setWeaponLoading(false);
   };
@@ -181,7 +291,15 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
     setEditingBuild(build);
     try {
       const d = await fetchAPI(weaponDetailQ(build.weaponId, gameMode));
-      if (d?.item) { setSelectedWeapon(d.item); setMods(build.mods || {}); setBuildName(build.name || ""); setScreen("edit"); }
+      if (d?.item) {
+        setSelectedWeapon(d.item);
+        setMods(build.mods || {});
+        setLockedPaths(new Set(build.lockedPaths || []));
+        setCustomTargets(build.customTargets || { e: 0, r: 0 });
+        setOpMode("balanced");
+        setBuildName(build.name || "");
+        setScreen("edit");
+      }
     } catch(e) {}
     setWeaponLoading(false);
   };
@@ -199,6 +317,8 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
       name: buildName || selectedWeapon?.shortName + " Build",
       weaponId: selectedWeapon.id,
       mods: { ...mods },
+      lockedPaths: [...lockedPaths],
+      customTargets: { ...customTargets },
       createdAt: editingBuild?.createdAt || Date.now(),
     };
     const existing = savedBuilds.findIndex(b => b.id === build.id);
@@ -249,7 +369,45 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
     const { slot, path } = pickerSlot;
     const items = slot.filters?.allowedItems || [];
     const currentModId = mods[path];
-    const sortedItems = [...items].sort((a, b) => {
+
+    // Build the set of currently-installed mod IDs (across the whole
+    // build) so we can mark items in the picker that conflict with
+    // them. The user wouldn't be able to install a conflicting item
+    // without first removing the conflicting one — surfacing this
+    // upfront saves a round-trip.
+    const installedIds = new Set(Object.values(mods));
+    const conflictsFor = (item) => {
+      const cis = item.conflictingItems;
+      if (!cis) return null;
+      for (const c of cis) {
+        if (c.id === currentModId) continue; // installed in THIS slot doesn't count
+        if (installedIds.has(c.id)) {
+          // Find the conflicting mod's display name by searching all
+          // allowedItems lists in the weapon's slot tree.
+          let name = "another installed mod";
+          const findName = (slots, prefix) => {
+            for (const s of slots || []) {
+              for (const it of s.filters?.allowedItems || []) {
+                if (it.id === c.id) name = it.shortName || it.name;
+                if (it.properties?.slots) findName(it.properties.slots, "");
+              }
+            }
+          };
+          findName(selectedWeapon?.properties?.slots, "");
+          return name;
+        }
+      }
+      return null;
+    };
+
+    const search = modSearch.trim().toLowerCase();
+    const filteredItems = search
+      ? items.filter((it) =>
+          (it.name || "").toLowerCase().includes(search)
+          || (it.shortName || "").toLowerCase().includes(search)
+        )
+      : items;
+    const sortedItems = [...filteredItems].sort((a, b) => {
       if (modSort === "price") {
         const pa = getCheapestPrice(a)?.priceRUB || Infinity;
         const pb = getCheapestPrice(b)?.priceRUB || Infinity;
@@ -263,10 +421,16 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
       <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
         <div style={{ background: T.surface, borderBottom: `1px solid ${T.border}`, padding: "10px 14px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-            <button onClick={() => setPickerSlot(null)} style={{ background: "transparent", border: "none", color: T.textDim, fontSize: T.fs3, cursor: "pointer", fontFamily: T.sans, padding: 0 }}>← BACK</button>
-            <div style={{ fontSize: T.fs2, color: T.textDim }}>{items.length} options</div>
+            <button onClick={() => { setPickerSlot(null); setModSearch(""); }} style={{ background: "transparent", border: "none", color: T.textDim, fontSize: T.fs3, cursor: "pointer", fontFamily: T.sans, padding: 0 }}>← BACK</button>
+            <div style={{ fontSize: T.fs2, color: T.textDim }}>{filteredItems.length}{search ? ` of ${items.length}` : ""} options</div>
           </div>
           <div style={{ fontSize: T.fs4, color: T.gold, fontWeight: "bold", letterSpacing: 1, marginBottom: 8 }}>{slot.name.toUpperCase()}</div>
+          <input
+            value={modSearch}
+            onChange={(e) => setModSearch(e.target.value)}
+            placeholder="Search mods..."
+            style={{ width: "100%", background: T.inputBg, border: `1px solid ${T.borderBright}`, color: T.textBright, padding: "6px 10px", fontSize: T.fs2, fontFamily: T.sans, outline: "none", boxSizing: "border-box", marginBottom: 8 }}
+          />
           <div style={{ display: "flex", gap: 4 }}>
             {["name", "price", "ergo", "recoil"].map(s => (
               <button key={s} onClick={() => setModSort(s)} style={{ flex: 1, background: modSort === s ? T.gold + "22" : "transparent", border: `1px solid ${modSort === s ? T.gold : T.border}`, color: modSort === s ? T.gold : T.textDim, padding: "4px 0", fontSize: T.fs1, cursor: "pointer", fontFamily: T.sans, letterSpacing: 0.5, textTransform: "uppercase" }}>{s}</button>
@@ -275,13 +439,19 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
         </div>
         <div style={{ flex: 1, overflowY: "auto", padding: 14 }}>
           {!slot.required && (
-            <button onClick={() => { const next = { ...mods }; delete next[path]; setMods(next); setPickerSlot(null); }} style={{ width: "100%", background: T.errorBg, border: `1px solid ${T.errorBorder}`, color: T.error, padding: "10px 0", fontSize: T.fs2, cursor: "pointer", fontFamily: T.sans, letterSpacing: 1, marginBottom: 10 }}>✕ CLEAR SLOT</button>
+            <button onClick={() => { const next = { ...mods }; delete next[path]; setMods(next); setPickerSlot(null); setModSearch(""); }} style={{ width: "100%", background: T.errorBg, border: `1px solid ${T.errorBorder}`, color: T.error, padding: "10px 0", fontSize: T.fs2, cursor: "pointer", fontFamily: T.sans, letterSpacing: 1, marginBottom: 10 }}>✕ CLEAR SLOT</button>
+          )}
+          {sortedItems.length === 0 && (
+            <div style={{ color: T.textDim, fontSize: T.fs2, textAlign: "center", padding: 20 }}>
+              No mods match "{modSearch}".
+            </div>
           )}
           {sortedItems.map(item => {
             const isSelected = currentModId === item.id;
             const cheapest = getCheapestPrice(item);
+            const conflictName = conflictsFor(item);
             return (
-              <button key={item.id} onClick={() => { setMods({ ...mods, [path]: item.id }); setPickerSlot(null); }}
+              <button key={item.id} onClick={() => { setMods({ ...mods, [path]: item.id }); setPickerSlot(null); setModSearch(""); }}
                 style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", background: isSelected ? T.gold + "22" : T.surface, border: `1px solid ${isSelected ? T.gold : T.border}`, borderLeft: `2px solid ${isSelected ? T.gold : "transparent"}`, padding: 10, marginBottom: 4, cursor: "pointer", textAlign: "left" }}>
                 {item.gridImageLink && <img src={item.gridImageLink} alt="" style={{ width: 48, height: 48, objectFit: "contain", background: T.inputBg, border: `1px solid ${T.border}`, flexShrink: 0 }} />}
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -290,6 +460,11 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
                     {cheapest && <span style={{ fontSize: T.fs1, color: T.gold, whiteSpace: "nowrap", flexShrink: 0 }}>{fmtPrice(cheapest.priceRUB)}</span>}
                   </div>
                   {cheapest?.vendor && <div style={{ fontSize: T.fs1, color: T.textDim, marginTop: 1 }}>{cheapest.vendor.name}{cheapest.vendor.minTraderLevel ? " LL" + cheapest.vendor.minTraderLevel : ""}</div>}
+                  {conflictName && (
+                    <div style={{ fontSize: T.fs1, color: T.error, marginTop: 2, fontWeight: "bold" }}>
+                      ⚠ Conflicts with installed {conflictName}
+                    </div>
+                  )}
                   <ModStats mod={item} />
                 </div>
               </button>
@@ -362,25 +537,110 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
       </div>
     );
 
-    // Slot category grouping
-    const slotCategory = (nameId) => {
-      if (/barrel|muzzle|gas_block/i.test(nameId)) return "BARREL & MUZZLE";
-      if (/reciever|receiver|handguard|charge|launcher/i.test(nameId)) return "BODY & INTERNALS";
-      if (/stock|pistol/i.test(nameId)) return "STOCK & GRIP";
-      if (/scope|sight|mount/i.test(nameId)) return "OPTICS & SIGHTS";
-      if (/tactical|flashlight/i.test(nameId)) return "TACTICAL";
-      if (/magazine/i.test(nameId)) return "MAGAZINE";
-      return "OTHER";
+    // Mode buttons run the optimizer immediately on click. CUSTOM also
+    // runs once with the current slider targets; subsequent slider/lock
+    // changes are picked up by the auto-run effect (debouncedTargets dep).
+    const runMode = (mode) => {
+      setOpMode(mode);
+      const opts = { currentMods: mods, lockedPaths };
+      if (mode === "custom") {
+        opts.ergoTarget = customTargets.e;
+        opts.recoilTarget = customTargets.r;
+        setMods(optimizeBuild(selectedWeapon, "custom", opts));
+        return;
+      }
+      const apiMode = mode === "balanced" ? "recoil-balanced" : mode;
+      setMods(optimizeBuild(selectedWeapon, apiMode, opts));
     };
-    const categoryOrder = ["BARREL & MUZZLE", "BODY & INTERNALS", "STOCK & GRIP", "OPTICS & SIGHTS", "TACTICAL", "MAGAZINE", "OTHER"];
-    const grouped = {};
-    (wp.slots || []).forEach(slot => {
-      const cat = slotCategory(slot.nameId);
-      if (!grouped[cat]) grouped[cat] = [];
-      grouped[cat].push(slot);
-    });
 
-    // Recursive slot renderer — visual assembly cards
+    const toggleLock = (path) => {
+      setLockedPaths((prev) => {
+        const next = new Set(prev);
+        if (next.has(path)) next.delete(path);
+        else next.add(path);
+        return next;
+      });
+    };
+
+    const resetAllMods = () => {
+      if (!window.confirm("Clear all mods and locks for this build?")) return;
+      setMods({});
+      setLockedPaths(new Set());
+      setCustomTargets({ e: 0, r: 0 });
+      // Exit CUSTOM so the auto-run effect doesn't immediately re-fill
+      // mods with an unconstrained max-sum build.
+      setOpMode("balanced");
+    };
+
+    // Single-slot swap suggestions: for each currently-installed mod on
+    // a non-locked path, find the best compatible alternative whose
+    // (ergo + recoil-ctrl) score beats the current pick. Top 5 by gain
+    // are surfaced below the assembly so the user can fine-tune one
+    // slot at a time without re-running a full optimization.
+    const swapSuggestions = (() => {
+      if (!selectedWeapon) return [];
+      const out = [];
+      const installedIds = new Set(Object.values(mods));
+      const score = (mp) => (mp?.ergonomics || 0) + (-(mp?.recoilModifier || 0)) * 100;
+      const walk = (slots, prefix) => {
+        for (const slot of slots || []) {
+          const path = prefix ? `${prefix}.${slot.nameId}` : slot.nameId;
+          const currentId = mods[path];
+          if (currentId) {
+            const skipImplicit = IMPLICIT_SKIP_RX.test(slot.nameId);
+            const isFrozen = lockedPaths.has(path) || skipImplicit;
+            const currentMod = slot.filters?.allowedItems?.find((i) => i.id === currentId);
+            if (currentMod && !isFrozen) {
+              const curScore = score(currentMod.properties);
+              let best = null;
+              for (const alt of slot.filters?.allowedItems || []) {
+                if (alt.id === currentId) continue;
+                let conflicts = false;
+                for (const c of alt.conflictingItems || []) {
+                  if (c.id === currentId) continue;
+                  if (installedIds.has(c.id)) { conflicts = true; break; }
+                }
+                if (conflicts) continue;
+                const altScore = score(alt.properties);
+                const delta = altScore - curScore;
+                if (delta > 0 && (!best || delta > best.delta)) {
+                  best = { alt, delta };
+                }
+              }
+              if (best) {
+                const ce = currentMod.properties?.ergonomics || 0;
+                const ne = best.alt.properties?.ergonomics || 0;
+                const cr = -(currentMod.properties?.recoilModifier || 0) * 100;
+                const nr = -(best.alt.properties?.recoilModifier || 0) * 100;
+                out.push({
+                  path,
+                  slotName: slot.name,
+                  fromMod: currentMod,
+                  toMod: best.alt,
+                  eDelta: Math.round(ne - ce),
+                  rDelta: Math.round(nr - cr),
+                  combined: best.delta,
+                });
+              }
+            }
+            // Recurse into the installed mod's sub-slots regardless of
+            // whether this slot suggested a swap.
+            if (currentMod?.properties?.slots) walk(currentMod.properties.slots, path);
+          }
+        }
+      };
+      walk(wp.slots, "");
+      return out.sort((a, b) => b.combined - a.combined).slice(0, 5);
+    })();
+
+    const applySwap = (path, modId) => {
+      setMods((prev) => ({ ...prev, [path]: modId }));
+    };
+
+    // Recursive slot renderer — visual assembly cards. Each card shows
+    // its mod, price, and a lock toggle. The toggle is informational
+    // (greyed out) for slots already implicitly preserved by the
+    // optimizer's DEFAULT_SKIP regex (scope/sight/magazine).
     const renderSlot = (slot, pathPrefix, depth = 0) => {
       const path = pathPrefix ? `${pathPrefix}.${slot.nameId}` : slot.nameId;
       const modId = mods[path];
@@ -388,37 +648,64 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
       const hasOptions = (slot.filters?.allowedItems?.length || 0) > 0;
       const modPrice = mod ? getCheapestPrice(mod) : null;
       const isSubSlot = depth > 0;
+      const implicitlySkipped = IMPLICIT_SKIP_RX.test(slot.nameId);
+      const isLocked = lockedPaths.has(path) || implicitlySkipped;
+      const lockBorder = isLocked ? T.cyan : (mod ? T.success : slot.required ? T.gold : T.border);
 
       return (
         <div key={path} style={{ marginLeft: isSubSlot ? 20 : 0, position: "relative" }}>
           {isSubSlot && <div style={{ position: "absolute", left: -12, top: 0, bottom: 0, width: 1, background: T.border }} />}
           {isSubSlot && <div style={{ position: "absolute", left: -12, top: 24, width: 12, height: 1, background: T.border }} />}
-          <button onClick={() => hasOptions && setPickerSlot({ slot, path })}
-            style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", background: mod ? T.surface : "transparent", border: `1px solid ${mod ? T.border : slot.required ? T.gold + "55" : T.border + "88"}`, borderLeft: `3px solid ${mod ? T.success : slot.required ? T.gold : T.border}`, padding: mod ? "8px 10px" : "10px", marginBottom: 5, cursor: hasOptions ? "pointer" : "default", textAlign: "left", opacity: hasOptions ? 1 : 0.4 }}>
-            {mod?.gridImageLink ? (
-              <img src={mod.gridImageLink} alt="" style={{ width: 56, height: 42, objectFit: "contain", background: T.inputBg, border: `1px solid ${T.border}`, flexShrink: 0 }} />
-            ) : (
-              <div style={{ width: 56, height: 42, border: `2px dashed ${slot.required ? T.gold + "55" : T.border}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                <span style={{ fontSize: 16, color: slot.required ? T.gold + "66" : T.textDim + "44" }}>+</span>
-              </div>
-            )}
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: T.fs1, color: mod ? T.textDim : (slot.required ? T.gold : T.textDim), letterSpacing: 0.8, marginBottom: 2 }}>{slot.name.toUpperCase()}{slot.required ? " *" : ""}</div>
-              {mod ? (
-                <>
-                  <div style={{ fontSize: T.fs2, color: T.textBright, fontWeight: "bold", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{mod.shortName || mod.name}</div>
-                  <ModStats mod={mod} />
-                </>
+          <div style={{ display: "flex", alignItems: "stretch", gap: 4, marginBottom: 5 }}>
+            <button onClick={() => hasOptions && setPickerSlot({ slot, path })}
+              style={{ flex: 1, display: "flex", alignItems: "center", gap: 10, background: mod ? T.surface : "transparent", border: `1px solid ${mod ? T.border : slot.required ? T.gold + "55" : T.border + "88"}`, borderLeft: `3px solid ${lockBorder}`, padding: mod ? "8px 10px" : "10px", cursor: hasOptions ? "pointer" : "default", textAlign: "left", opacity: hasOptions ? 1 : 0.4 }}>
+              {mod?.gridImageLink ? (
+                <img src={mod.gridImageLink} alt="" style={{ width: 56, height: 42, objectFit: "contain", background: T.inputBg, border: `1px solid ${T.border}`, flexShrink: 0 }} />
               ) : (
-                <div style={{ fontSize: T.fs2, color: T.textDim, fontStyle: "italic" }}>{hasOptions ? "Tap to add" : "No options"}</div>
+                <div style={{ width: 56, height: 42, border: `2px dashed ${slot.required ? T.gold + "55" : T.border}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <span style={{ fontSize: 16, color: slot.required ? T.gold + "66" : T.textDim + "44" }}>+</span>
+                </div>
               )}
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", flexShrink: 0, gap: 2 }}>
-              {modPrice && <span style={{ fontSize: T.fs1, color: T.gold }}>{fmtPrice(modPrice.priceRUB)}</span>}
-              {modPrice?.vendor && <span style={{ fontSize: T.fs1, color: T.textDim }}>{modPrice.vendor.name === "Flea Market" ? "Flea" : modPrice.vendor.name}{modPrice.vendor.minTraderLevel ? " LL" + modPrice.vendor.minTraderLevel : ""}</span>}
-              {!mod && hasOptions && <span style={{ color: T.textDim, fontSize: T.fs3 }}>▶</span>}
-            </div>
-          </button>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                  <span style={{ fontSize: T.fs1, color: mod ? T.textDim : (slot.required ? T.gold : T.textDim), letterSpacing: 0.8 }}>{slot.name.toUpperCase()}{slot.required ? " *" : ""}</span>
+                  {isLocked && <span style={{ fontSize: T.fs1, color: T.cyan, letterSpacing: 0.8, fontWeight: "bold" }}>{implicitlySkipped ? "AUTO" : "LOCKED"}</span>}
+                </div>
+                {mod ? (
+                  <>
+                    <div style={{ fontSize: T.fs2, color: T.textBright, fontWeight: "bold", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{mod.shortName || mod.name}</div>
+                    <ModStats mod={mod} />
+                  </>
+                ) : (
+                  <div style={{ fontSize: T.fs2, color: T.textDim, fontStyle: "italic" }}>{hasOptions ? "Tap to add" : "No options"}</div>
+                )}
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", flexShrink: 0, gap: 2 }}>
+                {modPrice && <span style={{ fontSize: T.fs1, color: T.gold }}>{fmtPrice(modPrice.priceRUB)}</span>}
+                {modPrice?.vendor && <span style={{ fontSize: T.fs1, color: T.textDim }}>{modPrice.vendor.name === "Flea Market" ? "Flea" : modPrice.vendor.name}{modPrice.vendor.minTraderLevel ? " LL" + modPrice.vendor.minTraderLevel : ""}</span>}
+                {!mod && hasOptions && <span style={{ color: T.textDim, fontSize: T.fs3 }}>▶</span>}
+              </div>
+            </button>
+            {/* Lock toggle. Implicit-skip slots show a non-clickable
+                indicator since they're already preserved by the optimizer. */}
+            {hasOptions && (
+              <button
+                onClick={(e) => { e.stopPropagation(); if (!implicitlySkipped) toggleLock(path); }}
+                title={implicitlySkipped ? "Optics, sights, and magazines are preserved automatically" : (isLocked ? "Locked — click to unlock" : "Unlocked — click to lock")}
+                style={{
+                  width: 28,
+                  background: isLocked ? T.cyan + "22" : "transparent",
+                  border: `1px solid ${isLocked ? T.cyan + "66" : T.border}`,
+                  color: isLocked ? T.cyan : T.textDim,
+                  cursor: implicitlySkipped ? "not-allowed" : "pointer",
+                  fontFamily: T.sans,
+                  fontSize: T.fs3,
+                  flexShrink: 0,
+                  opacity: implicitlySkipped ? 0.5 : 1,
+                }}
+              >{isLocked ? "🔒" : "🔓"}</button>
+            )}
+          </div>
           {mod?.properties?.slots && mod.properties.slots.map(subSlot => renderSlot(subSlot, path, depth + 1))}
         </div>
       );
@@ -426,18 +713,145 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
 
     return (
       <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-        {/* Thin header bar */}
+        {/* Top header bar — navigation + persistent toggles + save. */}
         <div style={{ background: T.surface, borderBottom: `1px solid ${T.border}`, padding: "8px 14px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
           <button onClick={() => { setScreen("list"); setSelectedWeapon(null); setEditingBuild(null); }} style={{ background: "transparent", border: "none", color: T.textDim, fontSize: T.fs3, cursor: "pointer", fontFamily: T.sans, padding: 0, flexShrink: 0 }}>← BACK</button>
-          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
-            <Tip text="Auto-fill options — overwrites current mod selections except scopes, sights, and magazines (those are left alone so your personal picks survive). OPT ERGO: maximize ergonomics. OPT RECOIL: minimize recoil at any cost. OPT BAL: heavy recoil focus but a mod's recoil gain must outweigh its ergo and accuracy penalties. All three respect conflicting-items restrictions." />
-            <button onClick={() => setMods(optimizeBuild(selectedWeapon, "ergo", { currentMods: mods }))} style={{ background: T.cyan + "22", border: `1px solid ${T.cyan}66`, color: T.cyan, padding: "4px 8px", fontSize: T.fs1, cursor: "pointer", fontFamily: T.sans, letterSpacing: 0.5 }}>OPT ERGO</button>
-            <button onClick={() => setMods(optimizeBuild(selectedWeapon, "recoil", { currentMods: mods }))} style={{ background: T.orange + "22", border: `1px solid ${T.orange}66`, color: T.orange, padding: "4px 8px", fontSize: T.fs1, cursor: "pointer", fontFamily: T.sans, letterSpacing: 0.5 }}>OPT RECOIL</button>
-            <button onClick={() => setMods(optimizeBuild(selectedWeapon, "recoil-balanced", { currentMods: mods }))} style={{ background: T.gold + "22", border: `1px solid ${T.gold}66`, color: T.gold, padding: "4px 8px", fontSize: T.fs1, cursor: "pointer", fontFamily: T.sans, letterSpacing: 0.5 }}>OPT BAL</button>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <button onClick={resetAllMods} title="Clear all mods and locks" style={{ background: T.errorBg, border: `1px solid ${T.errorBorder}`, color: T.error, padding: "4px 8px", fontSize: T.fs1, cursor: "pointer", fontFamily: T.sans, letterSpacing: 0.5 }}>RESET</button>
             <button onClick={() => { const next = gameMode === "pve" ? "regular" : "pve"; setGameMode(next); }} style={{ background: gameMode === "pve" ? T.cyan + "22" : T.orange + "22", border: `1px solid ${gameMode === "pve" ? T.cyan + "44" : T.orange + "44"}`, color: gameMode === "pve" ? T.cyan : T.orange, padding: "4px 8px", fontSize: T.fs1, cursor: "pointer", fontFamily: T.sans, letterSpacing: 0.5 }}>{gameMode === "pve" ? "PVE" : "PVP"}</button>
             <button onClick={saveBuild} style={{ background: T.successBg, border: `1px solid ${T.successBorder}`, color: T.success, padding: "6px 12px", fontSize: T.fs2, cursor: "pointer", fontFamily: T.sans, letterSpacing: 1 }}>SAVE</button>
           </div>
         </div>
+        {/* Mode selector row. Click runs the optimizer in the chosen
+            mode; CUSTOM additionally exposes two target sliders. */}
+        <div style={{ background: T.bg, borderBottom: `1px solid ${T.border}`, padding: "6px 14px", display: "flex", alignItems: "center", gap: 6 }}>
+          <Tip text="ERGO: maximize ergonomics. RECOIL: minimize recoil at any cost. BAL: best recoil while keeping ergo at half the achievable max. CUSTOM: set your own ergo and recoil floors. All four respect locked slots and item-conflict rules. Lock individual slots with the lock icon to keep your picks (e.g. preferred stock, foregrip)." />
+          {[
+            { id: "ergo",     label: "ERGO",   color: T.cyan },
+            { id: "recoil",   label: "RECOIL", color: T.orange },
+            { id: "balanced", label: "BAL",    color: T.gold },
+            { id: "custom",   label: "CUSTOM", color: T.purple },
+          ].map((m) => {
+            const active = opMode === m.id;
+            return (
+              <button key={m.id} onClick={() => runMode(m.id)}
+                style={{
+                  flex: 1,
+                  background: active ? m.color + "33" : "transparent",
+                  border: `1px solid ${active ? m.color : T.border}`,
+                  color: active ? m.color : T.textDim,
+                  padding: "5px 0",
+                  fontSize: T.fs1,
+                  cursor: "pointer",
+                  fontFamily: T.sans,
+                  letterSpacing: 0.8,
+                  fontWeight: active ? "bold" : "normal",
+                }}
+              >{m.label}</button>
+            );
+          })}
+        </div>
+        {/* CUSTOM mode panel — two sliders + feasibility status. Only
+            renders when CUSTOM is active so it doesn't clutter the
+            other modes. The auto-run effect picks up slider changes
+            after a 200ms debounce. */}
+        {opMode === "custom" && (() => {
+          const currentE = Math.round(computeTotalErgo(selectedWeapon, mods));
+          const currentR = Math.round(computeTotalRecoil(selectedWeapon, mods));
+          const eFeasible = currentE >= customTargets.e;
+          const rFeasible = currentR >= customTargets.r;
+          const feasible = eFeasible && rFeasible;
+          const eMax = maxStats.e || 1;
+          const rMax = maxStats.r || 1;
+          const ready = maxStats.e > 0 || maxStats.r > 0;
+          return (
+            <div style={{ background: T.surface, borderBottom: `1px solid ${T.border}`, padding: "10px 14px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <span style={{ fontSize: T.fs1, color: T.textDim, letterSpacing: 0.8 }}>CUSTOM TARGETS{!ready && " — computing max…"}</span>
+                <span style={{ fontSize: T.fs1, color: feasible ? T.success : T.gold, fontWeight: "bold", letterSpacing: 0.5 }}>
+                  {feasible ? "✓ FEASIBLE" : (!eFeasible && !rFeasible ? "⚠ BOTH UNMET" : !eFeasible ? "⚠ ERGO UNMET" : "⚠ RECOIL UNMET")}
+                </span>
+              </div>
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: T.fs1, color: T.textDim, marginBottom: 2 }}>
+                  <span style={{ color: T.cyan }}>ERGO TARGET</span>
+                  <span>
+                    {customTargets.e} / {maxStats.e || "?"}
+                    <span style={{ color: eFeasible ? T.success : T.error, marginLeft: 8 }}>now {currentE}</span>
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={eMax}
+                  value={Math.min(customTargets.e, eMax)}
+                  disabled={!ready}
+                  onChange={(ev) => setCustomTargets((p) => ({ ...p, e: Number(ev.target.value) }))}
+                  style={{ width: "100%", accentColor: T.cyan }}
+                />
+              </div>
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: T.fs1, color: T.textDim, marginBottom: 2 }}>
+                  <span style={{ color: T.orange }}>RECOIL CTRL TARGET <Tip text="Points of recoil reduction. Each mod with a recoilModifier of -0.05 contributes 5 points. Slider max equals what OPT RECOIL achieves on this weapon. Higher = stronger recoil control." /></span>
+                  <span>
+                    {customTargets.r} / {maxStats.r || "?"}
+                    <span style={{ color: rFeasible ? T.success : T.error, marginLeft: 8 }}>now {currentR}</span>
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={rMax}
+                  value={Math.min(customTargets.r, rMax)}
+                  disabled={!ready}
+                  onChange={(ev) => setCustomTargets((p) => ({ ...p, r: Number(ev.target.value) }))}
+                  style={{ width: "100%", accentColor: T.orange }}
+                />
+              </div>
+              {/* Pareto frontier mini-chart. Shows the achievable (E, R)
+                  trade-off curve for this weapon and the user's current
+                  target as a crosshair. Helps users see at a glance which
+                  combinations are reachable. */}
+              {frontier.length >= 2 && (() => {
+                const xMax = Math.max(maxStats.e || 1, ...frontier.map((p) => p.e));
+                const yMax = Math.max(maxStats.r || 1, ...frontier.map((p) => p.r));
+                const xPx = (e) => (e / xMax) * 100;
+                const yPx = (r) => 50 - (r / yMax) * 48;
+                const targetX = xPx(customTargets.e);
+                const targetY = yPx(customTargets.r);
+                const buildX = xPx(currentE);
+                const buildY = yPx(currentR);
+                return (
+                  <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: T.fs1, color: T.textDim, marginBottom: 4, letterSpacing: 0.8 }}>
+                      <span>FRONTIER</span>
+                      <span style={{ color: T.textDim }}>x: ergo · y: recoil ctrl</span>
+                    </div>
+                    <svg viewBox="0 0 100 50" preserveAspectRatio="none" style={{ width: "100%", height: 60, background: T.inputBg, border: `1px solid ${T.border}` }}>
+                      {/* Frontier polyline */}
+                      <polyline
+                        points={frontier.map((p) => `${xPx(p.e)},${yPx(p.r)}`).join(" ")}
+                        fill="none"
+                        stroke={T.gold}
+                        strokeWidth="0.5"
+                        opacity="0.6"
+                      />
+                      {/* Frontier points */}
+                      {frontier.map((p, idx) => (
+                        <circle key={idx} cx={xPx(p.e)} cy={yPx(p.r)} r="0.8" fill={T.gold} opacity="0.8" />
+                      ))}
+                      {/* User's target as a crosshair */}
+                      <line x1={targetX} y1="0" x2={targetX} y2="50" stroke={feasible ? T.success : T.error} strokeWidth="0.3" strokeDasharray="1,1" opacity="0.5" />
+                      <line x1="0" y1={targetY} x2="100" y2={targetY} stroke={feasible ? T.success : T.error} strokeWidth="0.3" strokeDasharray="1,1" opacity="0.5" />
+                      {/* Current build position */}
+                      <circle cx={buildX} cy={buildY} r="1.5" fill={feasible ? T.success : T.error} stroke={T.bg} strokeWidth="0.3" />
+                    </svg>
+                  </div>
+                );
+              })()}
+            </div>
+          );
+        })()}
         {/* Scrollable content — everything flows together */}
         <div style={{ flex: 1, overflowY: "auto" }}>
           {/* Weapon Hero Image */}
@@ -537,6 +951,34 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
               </div>
             );
           })()}
+          {/* Suggested swaps — single-slot fine-tuning. Skipped/locked
+              slots are filtered out; only paths the user can change
+              show up. Tap a row to apply the swap. */}
+          {swapSuggestions.length > 0 && (
+            <div style={{ padding: "0 14px 20px" }}>
+              <div style={{ fontSize: T.fs2, color: T.purple, letterSpacing: 1.5, marginBottom: 8, paddingBottom: 4, borderBottom: `1px solid ${T.purple}44`, fontFamily: T.sans, display: "flex", alignItems: "center", gap: 8 }}>
+                SUGGESTED SWAPS
+                <Tip text="Single-slot upgrades from your current build that don't conflict with anything else installed. Ranked by combined ergo + recoil-ctrl gain. Locked slots and scope/sight/magazine slots are excluded — unlock a slot to surface its swaps." />
+              </div>
+              {swapSuggestions.map((s) => (
+                <button key={s.path} onClick={() => applySwap(s.path, s.toMod.id)}
+                  style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", background: T.surface, border: `1px solid ${T.border}`, borderLeft: `2px solid ${T.purple}`, padding: 8, marginBottom: 4, cursor: "pointer", textAlign: "left" }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: T.fs1, color: T.textDim, letterSpacing: 0.8 }}>{s.slotName.toUpperCase()}</div>
+                    <div style={{ fontSize: T.fs2, color: T.textBright, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <span style={{ color: T.textDim }}>{s.fromMod.shortName || s.fromMod.name}</span>
+                      <span style={{ color: T.purple, margin: "0 6px" }}>→</span>
+                      <span style={{ color: T.textBright, fontWeight: "bold" }}>{s.toMod.shortName || s.toMod.name}</span>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", flexShrink: 0, gap: 1 }}>
+                    {s.eDelta !== 0 && <span style={{ fontSize: T.fs1, color: s.eDelta > 0 ? T.success : T.error }}>{s.eDelta > 0 ? "+" : ""}{s.eDelta} ergo</span>}
+                    {s.rDelta !== 0 && <span style={{ fontSize: T.fs1, color: s.rDelta > 0 ? T.success : T.error }}>{s.rDelta > 0 ? "+" : ""}{s.rDelta} recoil ctrl</span>}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     );

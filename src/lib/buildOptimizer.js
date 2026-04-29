@@ -2,49 +2,54 @@ import PRECOMPUTED_BUILDS from "../data/precomputed-builds.json";
 
 // Conflict-aware branch-and-bound optimizer for Tarkov weapon builds.
 //
-// Each mod in tarkov.dev has a `conflictingItems` array — items that cannot
-// be installed on the same weapon at the same time (e.g. an underbarrel
-// grenade launcher conflicts with handguards that extend over the barrel).
+// Three B&B variants live in this file:
 //
-// Two B&B variants live in this file:
+// 1. `optimizeSlots` (scalar) — used by "ergo" and "recoil" modes. Tries
+//    each compatible candidate per slot, recurses into sub-slots. Score
+//    is additive; pruned via per-slot upper bounds (unconstrained
+//    per-item max sum over the subtree) and UB-sorted slot order.
 //
-// 1. `optimizeSlots` (scalar) — used by "ergo" and "recoil" modes. For each
-//    slot tries "skip" (if optional) and every compatible candidate; for
-//    each pick recurses into the candidate's sub-slots. Partial scores are
-//    additive and pruned via a per-slot upper bound (unconstrained per-item
-//    max sum over the subtree) and UB-sorted slot order. Globally optimal
-//    given its scalar scoring function.
+// 2. `optimizeTargeted` (recoil + ergo floor) — used by "recoil-balanced"
+//    mode. Hard ergo floor at maxErgo/2; maximizes recoil reduction
+//    subject to that floor.
 //
-// 2. `optimizeTargeted` (two-axis) — used by "recoil-balanced" mode. Tracks
-//    `(totalRecoil, totalErgo)` separately through a flat dynamic-stack DFS.
-//    The objective is whole-build, not additive per mod:
-//        score = totalRecoil - BAL_ERGO_PENALTY × max(0, target - totalErgo)
-//    where `target` is half the weapon's max achievable ergo (computed via
-//    an OPT ERGO pass first). The penalty is asymmetric: below target hurts,
-//    above target is free, so the optimizer chases target-ergo-then-recoil
-//    rather than blindly maximizing both. This formulation finds
-//    Pareto-interior builds that no weighted-sum scalarization could ever
-//    pick.
+// 3. `optimizeCustom` (dual floors) — used by "custom" mode. User picks
+//    eTarget and rTarget independently. Score is `totalErgo + totalRecoil`,
+//    softened by an infeasibility penalty so the optimizer falls back to
+//    the closest-feasible build when targets can't be met.
+//
+// All three respect:
+//   - `skipSlot(nameId)` — implicit slot skip (default: scope/sight/magazine).
+//   - `lockedPaths` — explicit per-path locks. Forced paths preserve
+//     `currentMods[path]` and participate in the conflict pool.
+//
+// "Forced" = skipSlot match OR path in lockedPaths. Either way the slot
+// is treated as fixed during DFS: no branching, just descend into the
+// forced mod's sub-slots (which themselves may be forced or free).
 
-// Scope, sight, and magazine slots are skipped by default — players usually
-// have strong personal preferences there (zoom level, mag capacity) that
-// an optimizer shouldn't override. The caller can pass a custom `skipSlot`
-// predicate if they want different behavior.
 const DEFAULT_SKIP = /scope|sight|magazine/i;
 function defaultSkipSlot(nameId) {
   return DEFAULT_SKIP.test(nameId || "");
 }
 
-// Legacy weight for the deprecated weighted-sum formulation of
-// "recoil-balanced". Unused by the new target-based optimizer but kept at
-// 1.0 as a neutral baseline in case anything still calls scoreMod with
-// mode="recoil-balanced".
+// Legacy weight on the deprecated weighted-sum "recoil-balanced" formula.
+// Unused by the target-based optimizer — kept at 1.0 in case anything
+// still calls scoreMod with mode="recoil-balanced".
 const BAL_RECOIL_WEIGHT = 1.0;
 
-// How many recoil points are forfeited per 1 ergo below target. λ=1 means
-// a mod buying 1% recoil reduction (1 pt) must close at least 1 ergo of
-// target-gap to be worth taking. Tune upward to tighten the target band.
+// How many recoil points are forfeited per 1 ergo below target in the
+// "recoil-balanced" two-axis B&B. λ=1 means a mod buying 1 pt of recoil
+// reduction must close at least 1 ergo of target-gap to be worth taking.
 const BAL_ERGO_PENALTY = 1.0;
+
+// Penalty multiplier for CUSTOM mode infeasibility. With penalty > 1 a
+// 1-unit deficit reduction is worth more than a 1-unit raw-score gain,
+// so the optimizer prioritizes reaching feasibility before chasing slack.
+// Once feasible (deficit = 0), score reduces to E + R and slack is
+// maximized.
+const CUSTOM_INFEASIBILITY_PENALTY = 2.0;
+
+const EMPTY_SET = Object.freeze(new Set());
 
 function scoreMod(mp, mode) {
   if (!mp) return 0;
@@ -69,18 +74,43 @@ function isCompatible(item, chosenIds, conflictPool) {
   return true;
 }
 
-const EMPTY_SET = Object.freeze(new Set());
+function isForced(path, slot, ctx) {
+  return ctx.skipSlot(slot.nameId) || ctx.lockedPaths.has(path);
+}
 
-// Admissible upper bound on the score a slot can contribute, ignoring all
-// conflicts. Computed as the per-item-max recursion over the subtree: at
-// each slot pick the item with the highest (score + sum of sub-UBs).
-// Memoized on the slot object identity.
-function ubForSlot(slot, ctx) {
-  if (ctx.skipSlot(slot.nameId)) return 0;
-  if (ctx.ubCache.has(slot)) return ctx.ubCache.get(slot);
+// Returns the locked/skipped mod object at `path`, or null if the slot
+// is forced-empty or the locked id no longer matches an allowed item.
+function getForcedMod(slot, path, ctx) {
+  const id = ctx.currentMods[path];
+  if (!id) return null;
+  return slot?.filters?.allowedItems?.find((i) => i.id === id) || null;
+}
+
+// Path-aware admissible UB on score for a slot at `path`. Cached per
+// path (Map) — same slot encountered at different paths can have different
+// UBs because forced status is per-path. Cache lifetime is per optimizer
+// call (ctx.ubCache is created fresh).
+function ubForSlot(slot, path, ctx) {
+  if (ctx.ubCache.has(path)) return ctx.ubCache.get(path);
+
+  if (isForced(path, slot, ctx)) {
+    const mod = getForcedMod(slot, path, ctx);
+    if (!mod) {
+      ctx.ubCache.set(path, 0);
+      return 0;
+    }
+    let total = scoreMod(mod.properties, ctx.mode);
+    const subSlots = mod.properties?.slots || [];
+    for (const sub of subSlots) {
+      total += ubForSlot(sub, `${path}.${sub.nameId}`, ctx);
+    }
+    ctx.ubCache.set(path, total);
+    return total;
+  }
+
   const items = slot?.filters?.allowedItems || [];
   if (items.length === 0) {
-    ctx.ubCache.set(slot, 0);
+    ctx.ubCache.set(path, 0);
     return 0;
   }
   let maxItemUB = slot.required ? -Infinity : 0;
@@ -88,21 +118,66 @@ function ubForSlot(slot, ctx) {
     if (ctx.isAvailable && !ctx.isAvailable(item)) continue;
     let total = scoreMod(item.properties, ctx.mode);
     const subSlots = item.properties?.slots || [];
-    for (const sub of subSlots) total += ubForSlot(sub, ctx);
+    for (const sub of subSlots) {
+      total += ubForSlot(sub, `${path}.${sub.nameId}`, ctx);
+    }
     if (total > maxItemUB) maxItemUB = total;
   }
-  ctx.ubCache.set(slot, maxItemUB);
+  ctx.ubCache.set(path, maxItemUB);
   return maxItemUB;
 }
 
-// Greedy subtree evaluator — used only to seed scalar B&B with a
-// non-trivial lower bound. Depth-first, natural sibling order; not
-// guaranteed optimal when conflicts appear between siblings or across
-// slots.
+// Greedy subtree evaluator. Used to seed the scalar B&B with a
+// non-trivial lower bound. Forced slots descend into the locked mod;
+// free slots try natural sibling order.
 function greedySubtree(slot, path, ctx, chosenIds, conflictPool) {
-  if (ctx.skipSlot(slot.nameId)) return { score: 0, mods: {}, picked: [] };
   const items = slot?.filters?.allowedItems || [];
   if (items.length === 0) return { score: 0, mods: {}, picked: [] };
+
+  if (isForced(path, slot, ctx)) {
+    const mod = getForcedMod(slot, path, ctx);
+    if (!mod) return { score: 0, mods: {}, picked: [] };
+    if (!isCompatible(mod, chosenIds, conflictPool)) {
+      // Locked mod conflicts with already-chosen state. Surface as
+      // failure (-Infinity) so the caller knows greedy can't satisfy
+      // every lock; B&B will then explore alternatives that respect
+      // the locks. If no such alternative exists (mutually-conflicting
+      // user locks), the optimizer falls back to {} mods.
+      return { score: -Infinity, mods: {}, picked: [] };
+    }
+    const localChosen = new Set(chosenIds);
+    localChosen.add(mod.id);
+    const localConflicts = new Set(conflictPool);
+    if (mod.conflictingItems) {
+      for (const c of mod.conflictingItems) localConflicts.add(c.id);
+    }
+    let subScore = 0;
+    const subMods = { [path]: mod.id };
+    const subPicked = [mod];
+    const subSlots = mod.properties?.slots || [];
+    for (const sub of subSlots) {
+      const subPath = `${path}.${sub.nameId}`;
+      const subBest = greedySubtree(sub, subPath, ctx, localChosen, localConflicts);
+      if (subBest.score === -Infinity) {
+        if (sub.required) return { score: -Infinity, mods: {}, picked: [] };
+        continue;
+      }
+      subScore += subBest.score;
+      Object.assign(subMods, subBest.mods);
+      for (const m of subBest.picked) {
+        subPicked.push(m);
+        localChosen.add(m.id);
+        if (m.conflictingItems) {
+          for (const c of m.conflictingItems) localConflicts.add(c.id);
+        }
+      }
+    }
+    return {
+      score: scoreMod(mod.properties, ctx.mode) + subScore,
+      mods: subMods,
+      picked: subPicked,
+    };
+  }
 
   let best = slot.required
     ? { score: -Infinity, mods: {}, picked: [] }
@@ -126,6 +201,7 @@ function greedySubtree(slot, path, ctx, chosenIds, conflictPool) {
     for (const sub of subSlots) {
       const subPath = `${path}.${sub.nameId}`;
       const subBest = greedySubtree(sub, subPath, ctx, localChosen, localConflicts);
+      if (subBest.score === -Infinity) continue;
       subScore += subBest.score;
       Object.assign(subMods, subBest.mods);
       for (const m of subBest.picked) {
@@ -145,16 +221,26 @@ function greedySubtree(slot, path, ctx, chosenIds, conflictPool) {
   return best;
 }
 
-// Greedy fill over a list of slots, UB-sorted. Produces a valid
-// configuration used as the B&B seed.
 function greedyFillSlots(active, pathPrefix, ctx, initialChosen, initialConflicts) {
+  // Two-pass: forced slots first (deterministic, populate the conflict
+  // pool with locked-in mods), then free slots (work around the locks).
+  // Without this ordering greedy can pick a free mod that conflicts
+  // with a later forced slot, then fall back to dropping the lock.
+  const forcedSlots = [];
+  const freeSlots = [];
+  for (const slot of active) {
+    const path = pathPrefix ? `${pathPrefix}.${slot.nameId}` : slot.nameId;
+    if (isForced(path, slot, ctx)) forcedSlots.push(slot);
+    else freeSlots.push(slot);
+  }
+
   let score = 0;
   const mods = {};
   const picked = [];
   const chosenIds = new Set(initialChosen);
   const conflictPool = new Set(initialConflicts);
 
-  for (const slot of active) {
+  for (const slot of [...forcedSlots, ...freeSlots]) {
     const path = pathPrefix ? `${pathPrefix}.${slot.nameId}` : slot.nameId;
     const sub = greedySubtree(slot, path, ctx, chosenIds, conflictPool);
     if (sub.score === -Infinity) return { score: -Infinity, mods: {}, picked: [] };
@@ -171,25 +257,39 @@ function greedyFillSlots(active, pathPrefix, ctx, initialChosen, initialConflict
   return { score, mods, picked };
 }
 
-// Scalar B&B over a list of slots. For each slot, try skipping (if not
-// required) and every compatible candidate; for each candidate, recurse
-// into its sub-slots. Prune when the best-case completion can't beat the
-// current best.
+// Scalar B&B over a list of slots. Forced paths handled inline (no
+// branching, just descend).
 function optimizeSlots(slots, pathPrefix, ctx, initialChosen, initialConflicts) {
   const active = slots
-    .filter((s) => !ctx.skipSlot(s.nameId) && (s?.filters?.allowedItems?.length > 0))
+    .filter((s) => s?.filters?.allowedItems?.length > 0)
     .slice()
-    .sort((a, b) => ubForSlot(b, ctx) - ubForSlot(a, ctx));
+    .sort((a, b) => {
+      const pa = pathPrefix ? `${pathPrefix}.${a.nameId}` : a.nameId;
+      const pb = pathPrefix ? `${pathPrefix}.${b.nameId}` : b.nameId;
+      // Forced (locked / skipSlot) slots first — surfaces lock conflicts
+      // early so B&B can prune lock-incompatible branches before
+      // exploring deep. UB-desc within each bucket.
+      const fa = isForced(pa, a, ctx);
+      const fb = isForced(pb, b, ctx);
+      if (fa !== fb) return fa ? -1 : 1;
+      return ubForSlot(b, pb, ctx) - ubForSlot(a, pa, ctx);
+    });
 
   if (active.length === 0) return { score: 0, mods: {}, picked: [] };
 
-  const ubs = active.map((s) => ubForSlot(s, ctx));
+  const ubs = active.map((s) => {
+    const p = pathPrefix ? `${pathPrefix}.${s.nameId}` : s.nameId;
+    return ubForSlot(s, p, ctx);
+  });
   const suffixUB = new Array(active.length + 1).fill(0);
   for (let i = active.length - 1; i >= 0; i--) {
     suffixUB[i] = suffixUB[i + 1] + ubs[i];
   }
 
   let best = greedyFillSlots(active, pathPrefix, ctx, initialChosen, initialConflicts);
+  if (best.score === -Infinity) {
+    best = { score: 0, mods: {}, picked: [] };
+  }
 
   function dfs(i, curScore, curMods, curPicked, curChosen, curConflicts) {
     if (curScore + suffixUB[i] <= best.score) return;
@@ -201,6 +301,47 @@ function optimizeSlots(slots, pathPrefix, ctx, initialChosen, initialConflicts) 
     }
     const slot = active[i];
     const path = pathPrefix ? `${pathPrefix}.${slot.nameId}` : slot.nameId;
+
+    if (isForced(path, slot, ctx)) {
+      const mod = getForcedMod(slot, path, ctx);
+      if (!mod) {
+        // Locked-empty (or skipSlot with no current pick): slot stays
+        // empty, optimizer doesn't try to fill it.
+        dfs(i + 1, curScore, curMods, curPicked, curChosen, curConflicts);
+        return;
+      }
+      if (!isCompatible(mod, curChosen, curConflicts)) {
+        // Lock conflicts with already-chosen state — this branch can't
+        // honor the lock. PRUNE (return) so the optimizer backtracks
+        // and tries alternatives that respect the lock.
+        return;
+      }
+      const newChosen = new Set(curChosen);
+      newChosen.add(mod.id);
+      const newConflicts = new Set(curConflicts);
+      if (mod.conflictingItems) {
+        for (const c of mod.conflictingItems) newConflicts.add(c.id);
+      }
+      const subSlots = mod.properties?.slots || [];
+      const subBest = optimizeSlots(subSlots, path, ctx, newChosen, newConflicts);
+      if (subBest.score === -Infinity) return;
+      for (const m of subBest.picked) {
+        newChosen.add(m.id);
+        if (m.conflictingItems) {
+          for (const c of m.conflictingItems) newConflicts.add(c.id);
+        }
+      }
+      const itemScore = scoreMod(mod.properties, ctx.mode);
+      dfs(
+        i + 1,
+        curScore + itemScore + subBest.score,
+        { ...curMods, [path]: mod.id, ...subBest.mods },
+        [...curPicked, mod, ...subBest.picked],
+        newChosen,
+        newConflicts
+      );
+      return;
+    }
 
     if (!slot.required) {
       dfs(i + 1, curScore, curMods, curPicked, curChosen, curConflicts);
@@ -252,7 +393,7 @@ function optimizeSlots(slots, pathPrefix, ctx, initialChosen, initialConflicts) 
   return best;
 }
 
-// ---- Target-ergo (two-axis) optimizer for "recoil-balanced" mode ----
+// ---- Two-axis helpers ----
 
 function recoilContrib(mp) {
   return -(mp?.recoilModifier || 0) * 100;
@@ -262,9 +403,7 @@ function ergoContrib(mp) {
   return mp?.ergonomics || 0;
 }
 
-// Sum a build's total ergo from the weapon's base ergo plus each picked
-// mod's contribution, walking the mod tree via the mods map's keyed paths.
-function computeTotalErgo(weapon, mods) {
+export function computeTotalErgo(weapon, mods) {
   let total = weapon?.properties?.ergonomics || 0;
   const walk = (slots, prefix) => {
     if (!slots) return;
@@ -282,9 +421,7 @@ function computeTotalErgo(weapon, mods) {
   return total;
 }
 
-// Same walk for recoil — needed to seed optimizeTargeted with OPT ERGO's
-// score under the target-ergo objective.
-function computeTotalRecoil(weapon, mods) {
+export function computeTotalRecoil(weapon, mods) {
   let total = 0;
   const walk = (slots, prefix) => {
     if (!slots) return;
@@ -302,51 +439,44 @@ function computeTotalRecoil(weapon, mods) {
   return total;
 }
 
-
-// Target-ergo optimizer: flat-stack B&B maximizing recoil reduction
-// subject to a hard ergo floor (total ergo >= target). Reuses the same
-// conflict-aware, dual-axis UB infrastructure as the old 2-axis B&B, but
-// with a SCALAR objective (max recoil, so UB is tight) and an added
-// feasibility prune (infeasible branches get cut outright). The
-// combination of tight R pruning + hard feasibility check prunes
-// aggressively even on conflict-heavy weapons.
+// ---- "recoil-balanced" target-ergo optimizer ----
 //
-// Why a hard floor rather than a soft penalty: matches the stated
-// methodology ("best recoil while ergo stays near half the max"), and
-// feasibility pruning kills whole subtrees whose max achievable ergo
-// can't reach the floor — much more effective than merely downweighting
-// them.
+// Maximizes recoil reduction subject to a hard ergo floor (totalErgo >=
+// targetTotalErgo). Conflict-aware, dual-axis UB pruning + feasibility
+// pruning kills whole subtrees whose max attainable ergo can't reach
+// the floor.
 
 function optimizeTargeted(weapon, ctx, targetTotalErgo) {
   const baseErgo = weapon?.properties?.ergonomics || 0;
   const targetModErgo = targetTotalErgo - baseErgo;
   const topSlots = weapon?.properties?.slots || [];
 
-  // Per-slot scalar UBs for both R (what we maximize) and E (for
-  // feasibility). Reuse the existing scalar ubForSlot by constructing
-  // two throwaway contexts pointing at independent caches.
-  const rCtx = { ...ctx, mode: "recoil", ubCache: new WeakMap() };
-  const eCtx = { ...ctx, mode: "ergo", ubCache: new WeakMap() };
+  const rCtx = { ...ctx, mode: "recoil", ubCache: new Map() };
+  const eCtx = { ...ctx, mode: "ergo", ubCache: new Map() };
 
   const stack = [];
   for (const s of topSlots) {
-    if (ctx.skipSlot(s.nameId)) continue;
     if (!(s?.filters?.allowedItems?.length > 0)) continue;
     stack.push({ slot: s, pathPrefix: "" });
   }
-  // LIFO: highest-R-UB slot processed first so a promising solution
-  // surfaces early and tightens the bound.
-  stack.sort((a, b) => ubForSlot(a.slot, rCtx) - ubForSlot(b.slot, rCtx));
+  // LIFO: forced slots popped first (end of array), then highest-R-UB.
+  stack.sort((a, b) => {
+    const pa = a.pathPrefix ? `${a.pathPrefix}.${a.slot.nameId}` : a.slot.nameId;
+    const pb = b.pathPrefix ? `${b.pathPrefix}.${b.slot.nameId}` : b.slot.nameId;
+    const fa = isForced(pa, a.slot, ctx);
+    const fb = isForced(pb, b.slot, ctx);
+    if (fa !== fb) return fa ? 1 : -1;
+    return ubForSlot(a.slot, pa, rCtx) - ubForSlot(b.slot, pb, rCtx);
+  });
 
   let restR = 0;
   let restE = 0;
   for (const e of stack) {
-    restR += ubForSlot(e.slot, rCtx);
-    restE += ubForSlot(e.slot, eCtx);
+    const p = e.pathPrefix ? `${e.pathPrefix}.${e.slot.nameId}` : e.slot.nameId;
+    restR += ubForSlot(e.slot, p, rCtx);
+    restE += ubForSlot(e.slot, p, eCtx);
   }
 
-  // Infeasibility: even with every max-ergo pick we can't reach target.
-  // Shouldn't happen when target = max_ergo/2 but guard anyway.
   if (restE < targetModErgo) return null;
 
   let best = {
@@ -358,9 +488,7 @@ function optimizeTargeted(weapon, ctx, targetTotalErgo) {
   };
 
   function dfs(curR, curE, curMods, curPicked, curChosen, curConflicts) {
-    // Recoil UB: can we beat current best?
     if (curR + restR <= best.score) return;
-    // Feasibility UB: can we still reach target ergo?
     if (curE + restE < targetModErgo) return;
 
     if (stack.length === 0) {
@@ -379,10 +507,68 @@ function optimizeTargeted(weapon, ctx, targetTotalErgo) {
     const top = stack.pop();
     const slot = top.slot;
     const path = top.pathPrefix ? `${top.pathPrefix}.${slot.nameId}` : slot.nameId;
-    const slotUR = ubForSlot(slot, rCtx);
-    const slotUE = ubForSlot(slot, eCtx);
+    const slotUR = ubForSlot(slot, path, rCtx);
+    const slotUE = ubForSlot(slot, path, eCtx);
     restR -= slotUR;
     restE -= slotUE;
+
+    if (isForced(path, slot, ctx)) {
+      const mod = getForcedMod(slot, path, ctx);
+      if (!mod) {
+        // Locked-empty: slot stays empty, advance.
+        dfs(curR, curE, curMods, curPicked, curChosen, curConflicts);
+      } else if (!isCompatible(mod, curChosen, curConflicts)) {
+        // Lock conflicts — PRUNE (don't advance, force backtrack).
+      } else {
+        const newChosen = new Set(curChosen);
+        newChosen.add(mod.id);
+        const newConflicts = new Set(curConflicts);
+        if (mod.conflictingItems) {
+          for (const c of mod.conflictingItems) newConflicts.add(c.id);
+        }
+        const itemR = recoilContrib(mod.properties);
+        const itemE = ergoContrib(mod.properties);
+        const subSlots = mod.properties?.slots || [];
+        const pushed = [];
+        for (const s of subSlots) {
+          if (!(s?.filters?.allowedItems?.length > 0)) continue;
+          pushed.push({ slot: s, pathPrefix: path });
+        }
+        pushed.sort((a, b) => {
+          const pa = `${a.pathPrefix}.${a.slot.nameId}`;
+          const pb = `${b.pathPrefix}.${b.slot.nameId}`;
+          // Forced sub-slots popped first (end of stack); UB asc within bucket.
+          const fa = isForced(pa, a.slot, ctx);
+          const fb = isForced(pb, b.slot, ctx);
+          if (fa !== fb) return fa ? 1 : -1;
+          return ubForSlot(a.slot, pa, rCtx) - ubForSlot(b.slot, pb, rCtx);
+        });
+        for (const entry of pushed) {
+          const p = `${entry.pathPrefix}.${entry.slot.nameId}`;
+          stack.push(entry);
+          restR += ubForSlot(entry.slot, p, rCtx);
+          restE += ubForSlot(entry.slot, p, eCtx);
+        }
+        dfs(
+          curR + itemR,
+          curE + itemE,
+          { ...curMods, [path]: mod.id },
+          [...curPicked, mod],
+          newChosen,
+          newConflicts
+        );
+        for (let j = 0; j < pushed.length; j++) {
+          const entry = stack.pop();
+          const p = `${entry.pathPrefix}.${entry.slot.nameId}`;
+          restR -= ubForSlot(entry.slot, p, rCtx);
+          restE -= ubForSlot(entry.slot, p, eCtx);
+        }
+      }
+      stack.push(top);
+      restR += slotUR;
+      restE += slotUE;
+      return;
+    }
 
     if (!slot.required) {
       dfs(curR, curE, curMods, curPicked, curChosen, curConflicts);
@@ -395,8 +581,6 @@ function optimizeTargeted(weapon, ctx, targetTotalErgo) {
       if (!isCompatible(it, curChosen, curConflicts)) continue;
       compatible.push(it);
     }
-    // Sort by recoil contribution desc so a high-recoil build surfaces
-    // early and tightens the bound for later pruning.
     compatible.sort(
       (a, b) => recoilContrib(b.properties) - recoilContrib(a.properties)
     );
@@ -408,25 +592,28 @@ function optimizeTargeted(weapon, ctx, targetTotalErgo) {
       if (it.conflictingItems) {
         for (const c of it.conflictingItems) newConflicts.add(c.id);
       }
-
       const itemR = recoilContrib(it.properties);
       const itemE = ergoContrib(it.properties);
-
-      // Push sub-slots of this candidate.
       const subSlots = it.properties?.slots || [];
       const pushed = [];
       for (const s of subSlots) {
-        if (ctx.skipSlot(s.nameId)) continue;
         if (!(s?.filters?.allowedItems?.length > 0)) continue;
         pushed.push({ slot: s, pathPrefix: path });
       }
-      pushed.sort((a, b) => ubForSlot(a.slot, rCtx) - ubForSlot(b.slot, rCtx));
+      pushed.sort((a, b) => {
+        const pa = `${a.pathPrefix}.${a.slot.nameId}`;
+        const pb = `${b.pathPrefix}.${b.slot.nameId}`;
+        const fa = isForced(pa, a.slot, ctx);
+        const fb = isForced(pb, b.slot, ctx);
+        if (fa !== fb) return fa ? 1 : -1;
+        return ubForSlot(a.slot, pa, rCtx) - ubForSlot(b.slot, pb, rCtx);
+      });
       for (const entry of pushed) {
+        const p = `${entry.pathPrefix}.${entry.slot.nameId}`;
         stack.push(entry);
-        restR += ubForSlot(entry.slot, rCtx);
-        restE += ubForSlot(entry.slot, eCtx);
+        restR += ubForSlot(entry.slot, p, rCtx);
+        restE += ubForSlot(entry.slot, p, eCtx);
       }
-
       dfs(
         curR + itemR,
         curE + itemE,
@@ -435,12 +622,11 @@ function optimizeTargeted(weapon, ctx, targetTotalErgo) {
         newChosen,
         newConflicts
       );
-
-      // Unwind.
       for (let j = 0; j < pushed.length; j++) {
         const entry = stack.pop();
-        restR -= ubForSlot(entry.slot, rCtx);
-        restE -= ubForSlot(entry.slot, eCtx);
+        const p = `${entry.pathPrefix}.${entry.slot.nameId}`;
+        restR -= ubForSlot(entry.slot, p, rCtx);
+        restE -= ubForSlot(entry.slot, p, eCtx);
       }
     }
 
@@ -453,34 +639,283 @@ function optimizeTargeted(weapon, ctx, targetTotalErgo) {
   return best.score === -Infinity ? null : best;
 }
 
+// ---- "custom" dual-floor optimizer ----
+//
+// score = totalErgo + totalRecoil - PENALTY * (eDeficit + rDeficit)
+// where eDeficit = max(0, eTarget - totalErgo) and similarly for r.
+//
+// When BOTH floors are met, deficits are zero and the optimizer
+// maximizes the unconstrained sum (more slack = better build). When
+// either floor is unreachable, the penalty pushes the optimizer to
+// close whichever deficit is larger, returning the closest-feasible
+// build instead of refusing to optimize.
+
+function optimizeCustom(weapon, ctx, eTarget, rTarget) {
+  const baseErgo = weapon?.properties?.ergonomics || 0;
+  const eTargetMod = Math.max(0, eTarget - baseErgo);
+  const rTargetMod = Math.max(0, rTarget);
+  const topSlots = weapon?.properties?.slots || [];
+  const PENALTY = CUSTOM_INFEASIBILITY_PENALTY;
+
+  const rCtx = { ...ctx, mode: "recoil", ubCache: new Map() };
+  const eCtx = { ...ctx, mode: "ergo", ubCache: new Map() };
+
+  const stack = [];
+  for (const s of topSlots) {
+    if (!(s?.filters?.allowedItems?.length > 0)) continue;
+    stack.push({ slot: s, pathPrefix: "" });
+  }
+  // LIFO: forced slots popped first (end of array), then largest combined UB.
+  stack.sort((a, b) => {
+    const pa = a.pathPrefix ? `${a.pathPrefix}.${a.slot.nameId}` : a.slot.nameId;
+    const pb = b.pathPrefix ? `${b.pathPrefix}.${b.slot.nameId}` : b.slot.nameId;
+    const fa = isForced(pa, a.slot, ctx);
+    const fb = isForced(pb, b.slot, ctx);
+    if (fa !== fb) return fa ? 1 : -1;
+    return (ubForSlot(a.slot, pa, rCtx) + ubForSlot(a.slot, pa, eCtx))
+         - (ubForSlot(b.slot, pb, rCtx) + ubForSlot(b.slot, pb, eCtx));
+  });
+
+  let restR = 0;
+  let restE = 0;
+  for (const e of stack) {
+    const p = e.pathPrefix ? `${e.pathPrefix}.${e.slot.nameId}` : e.slot.nameId;
+    restR += ubForSlot(e.slot, p, rCtx);
+    restE += ubForSlot(e.slot, p, eCtx);
+  }
+
+  let best = {
+    combined: -Infinity,
+    score: 0,
+    mods: {},
+    picked: [],
+    totalRecoil: 0,
+    totalErgo: baseErgo,
+    feasible: false,
+  };
+
+  function combinedScore(curR, curE) {
+    const score = curR + curE;
+    const eDef = Math.max(0, eTargetMod - curE);
+    const rDef = Math.max(0, rTargetMod - curR);
+    return score - PENALTY * (eDef + rDef);
+  }
+
+  function combinedUB(curR, curE) {
+    const score = curR + curE + restR + restE;
+    const eDefLB = Math.max(0, eTargetMod - (curE + restE));
+    const rDefLB = Math.max(0, rTargetMod - (curR + restR));
+    return score - PENALTY * (eDefLB + rDefLB);
+  }
+
+  function commit(curR, curE, curMods, curPicked) {
+    const combined = combinedScore(curR, curE);
+    if (combined > best.combined) {
+      best = {
+        combined,
+        score: curR + curE,
+        mods: curMods,
+        picked: curPicked,
+        totalRecoil: curR,
+        totalErgo: baseErgo + curE,
+        feasible: curE >= eTargetMod && curR >= rTargetMod,
+      };
+    }
+  }
+
+  function dfs(curR, curE, curMods, curPicked, curChosen, curConflicts) {
+    if (combinedUB(curR, curE) <= best.combined) return;
+
+    if (stack.length === 0) {
+      commit(curR, curE, curMods, curPicked);
+      return;
+    }
+
+    const top = stack.pop();
+    const slot = top.slot;
+    const path = top.pathPrefix ? `${top.pathPrefix}.${slot.nameId}` : slot.nameId;
+    const slotUR = ubForSlot(slot, path, rCtx);
+    const slotUE = ubForSlot(slot, path, eCtx);
+    restR -= slotUR;
+    restE -= slotUE;
+
+    if (isForced(path, slot, ctx)) {
+      const mod = getForcedMod(slot, path, ctx);
+      if (!mod) {
+        dfs(curR, curE, curMods, curPicked, curChosen, curConflicts);
+      } else if (!isCompatible(mod, curChosen, curConflicts)) {
+        // Lock conflict — PRUNE.
+      } else {
+        const newChosen = new Set(curChosen);
+        newChosen.add(mod.id);
+        const newConflicts = new Set(curConflicts);
+        if (mod.conflictingItems) {
+          for (const c of mod.conflictingItems) newConflicts.add(c.id);
+        }
+        const itemR = recoilContrib(mod.properties);
+        const itemE = ergoContrib(mod.properties);
+        const subSlots = mod.properties?.slots || [];
+        const pushed = [];
+        for (const s of subSlots) {
+          if (!(s?.filters?.allowedItems?.length > 0)) continue;
+          pushed.push({ slot: s, pathPrefix: path });
+        }
+        pushed.sort((a, b) => {
+          const pa = `${a.pathPrefix}.${a.slot.nameId}`;
+          const pb = `${b.pathPrefix}.${b.slot.nameId}`;
+          const fa = isForced(pa, a.slot, ctx);
+          const fb = isForced(pb, b.slot, ctx);
+          if (fa !== fb) return fa ? 1 : -1;
+          return (ubForSlot(a.slot, pa, rCtx) + ubForSlot(a.slot, pa, eCtx))
+               - (ubForSlot(b.slot, pb, rCtx) + ubForSlot(b.slot, pb, eCtx));
+        });
+        for (const entry of pushed) {
+          const p = `${entry.pathPrefix}.${entry.slot.nameId}`;
+          stack.push(entry);
+          restR += ubForSlot(entry.slot, p, rCtx);
+          restE += ubForSlot(entry.slot, p, eCtx);
+        }
+        dfs(
+          curR + itemR,
+          curE + itemE,
+          { ...curMods, [path]: mod.id },
+          [...curPicked, mod],
+          newChosen,
+          newConflicts
+        );
+        for (let j = 0; j < pushed.length; j++) {
+          const entry = stack.pop();
+          const p = `${entry.pathPrefix}.${entry.slot.nameId}`;
+          restR -= ubForSlot(entry.slot, p, rCtx);
+          restE -= ubForSlot(entry.slot, p, eCtx);
+        }
+      }
+      stack.push(top);
+      restR += slotUR;
+      restE += slotUE;
+      return;
+    }
+
+    if (!slot.required) {
+      dfs(curR, curE, curMods, curPicked, curChosen, curConflicts);
+    }
+
+    const items = slot.filters.allowedItems;
+    const compatible = [];
+    for (const it of items) {
+      if (ctx.isAvailable && !ctx.isAvailable(it)) continue;
+      if (!isCompatible(it, curChosen, curConflicts)) continue;
+      compatible.push(it);
+    }
+    // Sort by combined R+E contribution desc to surface a high-score
+    // solution early and tighten bounds.
+    compatible.sort((a, b) =>
+      (recoilContrib(b.properties) + ergoContrib(b.properties))
+      - (recoilContrib(a.properties) + ergoContrib(a.properties))
+    );
+
+    for (const it of compatible) {
+      const newChosen = new Set(curChosen);
+      newChosen.add(it.id);
+      const newConflicts = new Set(curConflicts);
+      if (it.conflictingItems) {
+        for (const c of it.conflictingItems) newConflicts.add(c.id);
+      }
+      const itemR = recoilContrib(it.properties);
+      const itemE = ergoContrib(it.properties);
+      const subSlots = it.properties?.slots || [];
+      const pushed = [];
+      for (const s of subSlots) {
+        if (!(s?.filters?.allowedItems?.length > 0)) continue;
+        pushed.push({ slot: s, pathPrefix: path });
+      }
+      pushed.sort((a, b) => {
+        const pa = `${a.pathPrefix}.${a.slot.nameId}`;
+        const pb = `${b.pathPrefix}.${b.slot.nameId}`;
+        const fa = isForced(pa, a.slot, ctx);
+        const fb = isForced(pb, b.slot, ctx);
+        if (fa !== fb) return fa ? 1 : -1;
+        return (ubForSlot(a.slot, pa, rCtx) + ubForSlot(a.slot, pa, eCtx))
+             - (ubForSlot(b.slot, pb, rCtx) + ubForSlot(b.slot, pb, eCtx));
+      });
+      for (const entry of pushed) {
+        const p = `${entry.pathPrefix}.${entry.slot.nameId}`;
+        stack.push(entry);
+        restR += ubForSlot(entry.slot, p, rCtx);
+        restE += ubForSlot(entry.slot, p, eCtx);
+      }
+      dfs(
+        curR + itemR,
+        curE + itemE,
+        { ...curMods, [path]: it.id },
+        [...curPicked, it],
+        newChosen,
+        newConflicts
+      );
+      for (let j = 0; j < pushed.length; j++) {
+        const entry = stack.pop();
+        const p = `${entry.pathPrefix}.${entry.slot.nameId}`;
+        restR -= ubForSlot(entry.slot, p, rCtx);
+        restE -= ubForSlot(entry.slot, p, eCtx);
+      }
+    }
+
+    stack.push(top);
+    restR += slotUR;
+    restE += slotUE;
+  }
+
+  dfs(0, 0, {}, [], EMPTY_SET, EMPTY_SET);
+  return best.combined === -Infinity ? null : best;
+}
+
 /**
- * Given a full weapon detail object (from weaponDetailQ with
- * conflictingItems in the query) and a mode ("recoil" | "ergo" |
- * "recoil-balanced"), return a `mods` object compatible with BuildsTab's
- * state: `{ [slotPath]: modItemId }`.
+ * Optimize a weapon build.
  *
- * "ergo" and "recoil" use the scalar B&B with additive scoring.
- * "recoil-balanced" runs OPT ERGO first to find the weapon's max
- * achievable ergo, sets target = max_ergo / 2, then runs the two-axis
- * B&B to maximize recoil reduction while penalizing ergo below target.
+ * @param {object}   weapon  Full weapon detail (must include `conflictingItems`).
+ * @param {string}   mode    "ergo" | "recoil" | "recoil-balanced" | "custom"
+ * @param {object}   options
+ * @param {object}   options.currentMods   { [path]: modId } — user's current picks.
+ *                                         Locked/skipped paths preserve these.
+ * @param {Set|Array} options.lockedPaths  Paths the optimizer must preserve.
+ *                                         Locked mods participate in the conflict
+ *                                         pool.
+ * @param {Function} options.isAvailable   (item) => bool — filter to "what user can buy".
+ * @param {number}   options.ergoTarget    "custom" only — total-ergo floor.
+ * @param {number}   options.recoilTarget  "custom" only — recoil-reduction floor.
+ * @param {Function} options.skipSlot      Default scope/sight/magazine regex.
  *
- * Skipped slots (scope/sight/magazine by default) are never touched; if
- * the caller provides `currentMods`, their picks for those slots are
- * preserved in the result.
+ * @returns {object} `{ [path]: modId }` mods map. Stats are recoverable
+ *                   via `calcStats(weapon, mods)` from buildStats.js.
  */
 export function optimizeBuild(weapon, mode, options = {}) {
-  const { currentMods = {}, skipSlot = defaultSkipSlot, isAvailable = null } = options;
+  const {
+    currentMods = {},
+    lockedPaths: rawLockedPaths = EMPTY_SET,
+    isAvailable = null,
+    ergoTarget = null,
+    recoilTarget = null,
+    skipSlot = defaultSkipSlot,
+  } = options;
+  const lockedPaths = rawLockedPaths instanceof Set
+    ? rawLockedPaths
+    : new Set(rawLockedPaths || []);
   const slots = weapon?.properties?.slots || [];
 
-  // Fast path: look up a precomputed globally-optimal build. Precomputed
-  // results ignore trader-level availability (they're global optima over
-  // every mod), so we skip this path when the caller passes isAvailable
-  // and let the B&B run with the user's filter. Rerun scripts/precompute-
-  // builds.mjs after game balance patches or scoring-constant changes.
-  if (!isAvailable && weapon?.id) {
+  // Cache fast-path: precomputed JSON was built with default skipSlot,
+  // no availability filter, and no explicit locks. Only valid when the
+  // current call matches that profile and the mode is one of the three
+  // precomputed modes.
+  const canUseCache = !isAvailable
+    && lockedPaths.size === 0
+    && skipSlot === defaultSkipSlot
+    && mode !== "custom";
+
+  if (canUseCache && weapon?.id) {
     const precomputed = PRECOMPUTED_BUILDS[weapon.id]?.modes?.[mode];
     if (precomputed) {
       const result = { ...precomputed };
+      // Layer in user's currentMods for skipped paths (scope/sight/mag).
       for (const [path, id] of Object.entries(currentMods)) {
         const segments = path.split(".");
         const leaf = segments[segments.length - 1];
@@ -492,46 +927,42 @@ export function optimizeBuild(weapon, mode, options = {}) {
     }
   }
 
-  let mods;
-  if (mode === "recoil-balanced") {
-    // Phase 1: find max achievable ergo via scalar B&B.
-    const ergoCtx = {
-      mode: "ergo",
-      skipSlot,
-      isAvailable,
-      ubCache: new WeakMap(),
-    };
+  const baseCtx = {
+    skipSlot,
+    isAvailable,
+    lockedPaths,
+    currentMods,
+  };
+
+  let resultMods;
+
+  if (mode === "custom") {
+    const ctx = { ...baseCtx };
+    const result = optimizeCustom(weapon, ctx, ergoTarget || 0, recoilTarget || 0);
+    resultMods = result ? result.mods : {};
+  } else if (mode === "recoil-balanced") {
+    const ergoCtx = { ...baseCtx, mode: "ergo", ubCache: new Map() };
     const ergoResult = optimizeSlots(slots, "", ergoCtx, EMPTY_SET, EMPTY_SET);
     const maxErgo = computeTotalErgo(weapon, ergoResult.mods);
     const target = maxErgo / 2;
 
-    // Phase 2: DP-over-ergo with target-ergo objective + conflict resolution.
-    const ctx = {
-      skipSlot,
-      isAvailable,
-      ergoPenalty: BAL_ERGO_PENALTY,
-    };
+    const ctx = { ...baseCtx, ergoPenalty: BAL_ERGO_PENALTY };
     const targeted = optimizeTargeted(weapon, ctx, target);
-    mods = targeted ? targeted.mods : ergoResult.mods;
+    resultMods = targeted ? targeted.mods : ergoResult.mods;
   } else {
-    const ctx = {
-      mode,
-      skipSlot,
-      isAvailable,
-      ubCache: new WeakMap(),
-    };
-    mods = optimizeSlots(slots, "", ctx, EMPTY_SET, EMPTY_SET).mods;
+    const ctx = { ...baseCtx, mode, ubCache: new Map() };
+    resultMods = optimizeSlots(slots, "", ctx, EMPTY_SET, EMPTY_SET).mods;
   }
 
-  const result = { ...mods };
+  const result = { ...resultMods };
 
-  // Preserve the user's current picks for any skipped slot — e.g., their
-  // chosen scope or magazine — whether top-level or nested under another
-  // slot's path.
+  // Layer in user's currentMods for any skipped path the optimizer
+  // didn't write to (e.g. a scope path that the optimizer left empty
+  // because it's in the default skipSlot regex).
   for (const [path, id] of Object.entries(currentMods)) {
     const segments = path.split(".");
     const leaf = segments[segments.length - 1];
-    if (skipSlot(leaf)) {
+    if (skipSlot(leaf) && !(path in result)) {
       result[path] = id;
     }
   }

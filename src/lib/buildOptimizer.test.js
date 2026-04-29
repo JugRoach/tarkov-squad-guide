@@ -184,3 +184,172 @@ describe("optimizeBuild recoil-balanced (target-ergo methodology)", () => {
     expect(typeof result).toBe("object");
   });
 });
+
+describe("optimizeBuild lockedPaths", () => {
+  it("preserves the locked mod even when a higher-scoring alternative exists", () => {
+    const w = weapon([
+      slot("mod_stock", [mod("low", 5), mod("high", 50)]),
+    ]);
+    const result = optimizeBuild(w, "ergo", {
+      currentMods: { mod_stock: "low" },
+      lockedPaths: new Set(["mod_stock"]),
+    });
+    expect(result.mod_stock).toBe("low");
+  });
+
+  it("locked mod's conflicts block other slots from picking conflicting items", () => {
+    // Lock stock_a (which conflicts with grip_b). Optimizer must pick grip_alt.
+    const w = weapon([
+      slot("mod_stock", [mod("stock_a", 5, ["grip_b"])]),
+      slot("mod_grip", [mod("grip_b", 100), mod("grip_alt", 10)]),
+    ]);
+    const result = optimizeBuild(w, "ergo", {
+      currentMods: { mod_stock: "stock_a" },
+      lockedPaths: new Set(["mod_stock"]),
+    });
+    expect(result.mod_stock).toBe("stock_a");
+    expect(result.mod_grip).toBe("grip_alt");
+  });
+
+  it("locked-empty optional slot stays empty", () => {
+    const w = weapon([
+      slot("mod_stock", [mod("stock_a", 50)]),
+      slot("mod_tactical", [mod("tac_a", 30)]),
+    ]);
+    const result = optimizeBuild(w, "ergo", {
+      currentMods: {},
+      lockedPaths: new Set(["mod_tactical"]),
+    });
+    expect(result.mod_stock).toBe("stock_a");
+    expect(result.mod_tactical).toBeUndefined();
+  });
+
+  it("silently drops a lock that conflicts with itself / pre-chosen state", () => {
+    // Two locks that conflict with each other. Optimizer can't honor both,
+    // should drop one (or both) and produce a valid build instead of crashing.
+    const w = weapon([
+      slot("mod_stock", [mod("stock_a", 10, ["grip_b"])]),
+      slot("mod_grip", [mod("grip_b", 10, ["stock_a"])]),
+    ]);
+    const result = optimizeBuild(w, "ergo", {
+      currentMods: { mod_stock: "stock_a", mod_grip: "grip_b" },
+      lockedPaths: new Set(["mod_stock", "mod_grip"]),
+    });
+    // One lock wins, other dropped — both can't coexist. We just assert
+    // the result is a valid mods object and didn't crash.
+    expect(typeof result).toBe("object");
+  });
+
+  it("locks nested sub-slot path", () => {
+    // Lock the sub-slot's tactical pick, optimizer keeps it through opt run.
+    const w = weapon([
+      slot(
+        "mod_handguard",
+        [
+          mod("hg", 5, [], [
+            slot("mod_tactical", [mod("tac_low", 5), mod("tac_high", 50)]),
+          ]),
+        ],
+        { required: true }
+      ),
+    ]);
+    const result = optimizeBuild(w, "ergo", {
+      currentMods: { "mod_handguard.mod_tactical": "tac_low" },
+      lockedPaths: new Set(["mod_handguard.mod_tactical"]),
+    });
+    expect(result.mod_handguard).toBe("hg");
+    expect(result["mod_handguard.mod_tactical"]).toBe("tac_low");
+  });
+});
+
+describe("optimizeBuild custom mode (dual floors)", () => {
+  it("maximizes E + R when both targets are met (no constraint binding)", () => {
+    // Both at 0 → no floor → maximize E + R sum.
+    //   stock_a: E=10, R=20, sum=30 ← winner
+    //   stock_b: E=20, R=5,  sum=25
+    const w = weapon([
+      slot("mod_stock", [
+        mod("stock_a", { ergonomics: 10, recoilModifier: -0.2 }),
+        mod("stock_b", { ergonomics: 20, recoilModifier: -0.05 }),
+      ]),
+    ]);
+    const result = optimizeBuild(w, "custom", {
+      ergoTarget: 0,
+      recoilTarget: 0,
+    });
+    expect(result.mod_stock).toBe("stock_a");
+  });
+
+  it("respects ergo floor — picks lower-recoil option to clear it", () => {
+    //   stock_a: E=10, R=30  infeasible (E < 50) — closest, but penalty kicks
+    //   stock_b: E=60, R=5   feasible
+    //   stock_c: E=50, R=10  feasible ← winner (higher sum 60 vs 65)
+    // Wait: stock_b sum = 65, stock_c sum = 60. So stock_b wins.
+    const w = weapon([
+      slot("mod_stock", [
+        mod("stock_a", { ergonomics: 10, recoilModifier: -0.3 }),
+        mod("stock_b", { ergonomics: 60, recoilModifier: -0.05 }),
+        mod("stock_c", { ergonomics: 50, recoilModifier: -0.1 }),
+      ]),
+    ]);
+    const result = optimizeBuild(w, "custom", {
+      ergoTarget: 50,
+      recoilTarget: 0,
+    });
+    expect(result.mod_stock).toBe("stock_b");
+  });
+
+  it("respects recoil floor — picks higher-recoil option to clear it", () => {
+    //   stock_a: E=50, R=5   infeasible (R < 20)
+    //   stock_b: E=10, R=30  feasible ← winner (sum 40 with floors met)
+    //   stock_c: E=20, R=20  feasible (sum 40, ties stock_b)
+    const w = weapon([
+      slot("mod_stock", [
+        mod("stock_a", { ergonomics: 50, recoilModifier: -0.05 }),
+        mod("stock_b", { ergonomics: 10, recoilModifier: -0.3 }),
+      ]),
+    ]);
+    const result = optimizeBuild(w, "custom", {
+      ergoTarget: 0,
+      recoilTarget: 20,
+    });
+    expect(result.mod_stock).toBe("stock_b");
+  });
+
+  it("falls back to closest-feasible when neither option meets targets", () => {
+    // Targets: E=100, R=100 — unachievable.
+    //   stock_a: E=20, R=30  total deficit = 80 + 70 = 150
+    //   stock_b: E=50, R=10  total deficit = 50 + 90 = 140 ← lower deficit
+    // stock_b's combined: (50+10) - 2*(50+90) = 60 - 280 = -220
+    // stock_a's combined: (20+30) - 2*(80+70) = 50 - 300 = -250
+    // stock_b wins.
+    const w = weapon([
+      slot("mod_stock", [
+        mod("stock_a", { ergonomics: 20, recoilModifier: -0.3 }),
+        mod("stock_b", { ergonomics: 50, recoilModifier: -0.1 }),
+      ]),
+    ]);
+    const result = optimizeBuild(w, "custom", {
+      ergoTarget: 100,
+      recoilTarget: 100,
+    });
+    expect(result.mod_stock).toBe("stock_b");
+  });
+
+  it("respects locks in custom mode", () => {
+    // Lock stock_low even though stock_high would maximize the score.
+    const w = weapon([
+      slot("mod_stock", [
+        mod("stock_low", { ergonomics: 5, recoilModifier: 0 }),
+        mod("stock_high", { ergonomics: 50, recoilModifier: -0.3 }),
+      ]),
+    ]);
+    const result = optimizeBuild(w, "custom", {
+      ergoTarget: 0,
+      recoilTarget: 0,
+      currentMods: { mod_stock: "stock_low" },
+      lockedPaths: new Set(["mod_stock"]),
+    });
+    expect(result.mod_stock).toBe("stock_low");
+  });
+});
