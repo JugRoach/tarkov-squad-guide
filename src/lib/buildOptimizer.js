@@ -60,7 +60,13 @@ function scoreMod(mp, mode) {
     const acc = (mp.accuracyModifier || 0) * 100;
     return rec + ergo + acc;
   }
-  return -(mp.recoilModifier || 0);
+  // "recoil" mode: scale to percentage points so this matches
+  // recoilContrib's units. Without ×100, optimizeTargeted and
+  // optimizeCustom mix scales (curR uses ×100, restR uses ×1) and
+  // their UB pruning fires incorrectly. Relative ranking is preserved
+  // either way, so OPT RECOIL itself produces the same picks; the fix
+  // is necessary for the dual-axis B&Bs.
+  return -(mp.recoilModifier || 0) * 100;
 }
 
 function isCompatible(item, chosenIds, conflictPool) {
@@ -650,7 +656,7 @@ function optimizeTargeted(weapon, ctx, targetTotalErgo) {
 // close whichever deficit is larger, returning the closest-feasible
 // build instead of refusing to optimize.
 
-function optimizeCustom(weapon, ctx, eTarget, rTarget) {
+function optimizeCustom(weapon, ctx, eTarget, rTarget, seedMods = null) {
   const baseErgo = weapon?.properties?.ergonomics || 0;
   const eTargetMod = Math.max(0, eTarget - baseErgo);
   const rTargetMod = Math.max(0, rTarget);
@@ -699,6 +705,28 @@ function optimizeCustom(weapon, ctx, eTarget, rTarget) {
     const eDef = Math.max(0, eTargetMod - curE);
     const rDef = Math.max(0, rTargetMod - curR);
     return score - PENALTY * (eDef + rDef);
+  }
+
+  // Seed: when targets are 0 (or low) the feasibility prune does
+  // nothing, so the DFS would otherwise explore most of the search
+  // space. A precomputed seed (any complete build) gives the DFS a
+  // tight initial bound. Without this, CUSTOM at e=0 r=0 takes
+  // ~7s on conflict-heavy weapons; with it, <100ms.
+  if (seedMods) {
+    const seedE = computeTotalErgo(weapon, seedMods) - baseErgo;
+    const seedR = computeTotalRecoil(weapon, seedMods);
+    const seedCombined = combinedScore(seedR, seedE);
+    if (seedCombined > best.combined) {
+      best = {
+        combined: seedCombined,
+        score: seedR + seedE,
+        mods: { ...seedMods },
+        picked: [],
+        totalRecoil: seedR,
+        totalErgo: baseErgo + seedE,
+        feasible: seedE >= eTargetMod && seedR >= rTargetMod,
+      };
+    }
   }
 
   function combinedUB(curR, curE) {
@@ -938,8 +966,25 @@ export function optimizeBuild(weapon, mode, options = {}) {
 
   if (mode === "custom") {
     const ctx = { ...baseCtx };
-    const result = optimizeCustom(weapon, ctx, ergoTarget || 0, recoilTarget || 0);
-    resultMods = result ? result.mods : {};
+    // Seed the CUSTOM B&B with a complete build so the score-UB prune
+    // fires from turn 1. Without this, e=0 r=0 takes ~7s on
+    // conflict-heavy weapons (no feasibility prune to help). Precompute
+    // cache hits give a free seed; with locks/availability we run a
+    // fast scalar recoil-balanced pass for the seed.
+    let seedMods = null;
+    if (!isAvailable && lockedPaths.size === 0 && skipSlot === defaultSkipSlot && weapon?.id) {
+      seedMods = PRECOMPUTED_BUILDS[weapon.id]?.modes?.["recoil-balanced"] || null;
+    }
+    if (!seedMods) {
+      const ergoCtx = { ...baseCtx, mode: "ergo", ubCache: new Map() };
+      const ergoResult = optimizeSlots(slots, "", ergoCtx, EMPTY_SET, EMPTY_SET);
+      const maxErgo = computeTotalErgo(weapon, ergoResult.mods);
+      const balCtx = { ...baseCtx, ergoPenalty: BAL_ERGO_PENALTY };
+      const targeted = optimizeTargeted(weapon, balCtx, maxErgo / 2);
+      seedMods = targeted ? targeted.mods : ergoResult.mods;
+    }
+    const result = optimizeCustom(weapon, ctx, ergoTarget || 0, recoilTarget || 0, seedMods);
+    resultMods = result ? result.mods : (seedMods || {});
   } else if (mode === "recoil-balanced") {
     const ergoCtx = { ...baseCtx, mode: "ergo", ubCache: new Map() };
     const ergoResult = optimizeSlots(slots, "", ergoCtx, EMPTY_SET, EMPTY_SET);

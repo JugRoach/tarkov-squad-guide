@@ -135,6 +135,21 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
     }
   }, [calibers, leaderboardCaliber]);
 
+  // The optimizer's internal recoil metric is "sum of recoilModifier × 100"
+  // — a percentage that's weapon-agnostic. The user-facing slider, on the
+  // other hand, is in raw V+H recoil reduction (matches the stats panel
+  // and leaderboard's R column). These two helpers bridge the boundary.
+  const baseRecoilSum = (w) =>
+    (w?.properties?.recoilVertical || 0) + (w?.properties?.recoilHorizontal || 0);
+  const pctToRaw = (pct, w) => {
+    const base = baseRecoilSum(w);
+    return base > 0 ? Math.round((pct * base) / 100) : 0;
+  };
+  const rawToPct = (raw, w) => {
+    const base = baseRecoilSum(w);
+    return base > 0 ? (raw * 100) / base : 0;
+  };
+
   // Compute slider-range maximums (E_max, R_max) for the editor's CUSTOM
   // mode. "Max" is constrained by the user's locks — slider can't promise
   // values that aren't reachable given the locked picks.
@@ -146,7 +161,7 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
       const recoilMods = optimizeBuild(selectedWeapon, "recoil", opts);
       setMaxStats({
         e: Math.round(computeTotalErgo(selectedWeapon, ergoMods)),
-        r: Math.round(computeTotalRecoil(selectedWeapon, recoilMods)),
+        r: pctToRaw(computeTotalRecoil(selectedWeapon, recoilMods), selectedWeapon),
       });
     } catch {
       // Optimizer is pure-function. If it throws, leave maxStats unchanged
@@ -169,7 +184,8 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
         currentMods: mods,
         lockedPaths,
         ergoTarget: debouncedTargets.e,
-        recoilTarget: debouncedTargets.r,
+        // Convert raw V+H reduction (UI units) → recoilModifier-percentage (optimizer units).
+        recoilTarget: rawToPct(debouncedTargets.r, selectedWeapon),
       });
       setMods(newMods);
     } catch {
@@ -201,7 +217,8 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
           recoilTarget: 0,
         });
         const e = Math.round(computeTotalErgo(selectedWeapon, result));
-        const r = Math.round(computeTotalRecoil(selectedWeapon, result));
+        // Frontier display in raw V+H units to match the slider's scale.
+        const r = pctToRaw(computeTotalRecoil(selectedWeapon, result), selectedWeapon);
         const k = `${e},${r}`;
         if (seen.has(k)) continue;
         seen.add(k);
@@ -545,7 +562,8 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
       const opts = { currentMods: mods, lockedPaths };
       if (mode === "custom") {
         opts.ergoTarget = customTargets.e;
-        opts.recoilTarget = customTargets.r;
+        // Convert raw V+H reduction (UI units) → recoilModifier-percentage (optimizer units).
+        opts.recoilTarget = rawToPct(customTargets.r, selectedWeapon);
         setMods(optimizeBuild(selectedWeapon, "custom", opts));
         return;
       }
@@ -757,7 +775,9 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
             after a 200ms debounce. */}
         {opMode === "custom" && (() => {
           const currentE = Math.round(computeTotalErgo(selectedWeapon, mods));
-          const currentR = Math.round(computeTotalRecoil(selectedWeapon, mods));
+          // currentR shown in raw V+H reduction (matches stats panel
+          // and slider scale). Optimizer's internal pct gets converted.
+          const currentR = pctToRaw(computeTotalRecoil(selectedWeapon, mods), selectedWeapon);
           const eFeasible = currentE >= customTargets.e;
           const rFeasible = currentR >= customTargets.r;
           const feasible = eFeasible && rFeasible;
@@ -792,7 +812,7 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
               </div>
               <div>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: T.fs1, color: T.textDim, marginBottom: 2 }}>
-                  <span style={{ color: T.orange }}>RECOIL CTRL TARGET <Tip text="Points of recoil reduction. Each mod with a recoilModifier of -0.05 contributes 5 points. Slider max equals what OPT RECOIL achieves on this weapon. Higher = stronger recoil control." /></span>
+                  <span style={{ color: T.orange }}>RECOIL REDUCTION ↕↔ <Tip text="Combined vertical + horizontal recoil reduction in raw stat units — same scale as REC ↕ and REC ↔ in the stats panel. Slider max equals the raw V+H amount OPT RECOIL achieves on this weapon. Higher = stronger recoil control." /></span>
                   <span>
                     {customTargets.r} / {maxStats.r || "?"}
                     <span style={{ color: rFeasible ? T.success : T.error, marginLeft: 8 }}>now {currentR}</span>
@@ -1009,6 +1029,14 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
     const loadRowIntoEditor = (row) => {
       setSelectedWeapon(row.weapon);
       setMods({ ...row.mods });
+      // Reset editor state so we don't carry over locks / CUSTOM
+      // targets / opMode from a prior build. Without this, opening a
+      // leaderboard row while previously in CUSTOM mode triggered the
+      // CUSTOM auto-run + frontier sweep on the new weapon — for
+      // conflict-heavy guns that's many seconds of frozen UI.
+      setLockedPaths(new Set());
+      setCustomTargets({ e: 0, r: 0 });
+      setOpMode("balanced");
       setBuildName(`${row.weapon.shortName || row.weapon.name} (${modeLabel[leaderboardMode]})`);
       setEditingBuild(null);
       setScreen("edit");
