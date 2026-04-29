@@ -95,6 +95,10 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
   // by the CUSTOM-mode mini chart so the user can see the trade-off
   // curve their targets are sliding along.
   const [frontier, setFrontier] = useState([]);
+  // Frontier cache keyed by weaponId + sorted lock paths. Avoids
+  // recomputing the 5-point sweep when nothing relevant changed
+  // (e.g. user toggling between modes, slider drags).
+  const frontierCache = useRef(new Map());
   // Debounce slider drags so we don't run the optimizer on every pixel of movement.
   const debouncedTargets = useDebouncedValue(customTargets, 200);
 
@@ -180,11 +184,20 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
   useEffect(() => {
     if (opMode !== "custom" || !selectedWeapon) return;
     try {
+      // With both targets at 0 the CUSTOM B&B has nothing to constrain;
+      // route through recoil-balanced (cached, instant) instead of
+      // running a slow unconstrained search.
+      if (!debouncedTargets.e && !debouncedTargets.r) {
+        setMods(optimizeBuild(selectedWeapon, "recoil-balanced", {
+          currentMods: mods,
+          lockedPaths,
+        }));
+        return;
+      }
       const newMods = optimizeBuild(selectedWeapon, "custom", {
         currentMods: mods,
         lockedPaths,
         ergoTarget: debouncedTargets.e,
-        // Convert raw V+H reduction (UI units) → recoilModifier-percentage (optimizer units).
         recoilTarget: rawToPct(debouncedTargets.r, selectedWeapon),
       });
       setMods(newMods);
@@ -197,18 +210,37 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedTargets.e, debouncedTargets.r, lockedPaths, selectedWeapon?.id]);
 
-  // Pareto frontier compute: only when CUSTOM is active. Sweep the ergo
-  // axis at ~8 sample points, run the optimizer, dedupe and sort. The
-  // frontier is stable for a given weapon+locks; targets don't affect
-  // it. ~80–800ms total depending on weapon complexity.
+  // Pareto frontier compute. Cached per (weapon, locks). Each point is
+  // computed in its own setTimeout tick so the UI thread is free
+  // between optimizer runs — at worst the user sees brief stutters,
+  // not a sustained freeze. Diagnostic timing is logged so a slow
+  // weapon can be identified.
   useEffect(() => {
     if (opMode !== "custom" || !selectedWeapon) return;
     if (!maxStats.e) return;
-    const N = 8;
-    const points = [];
+    const cacheKey = `${selectedWeapon.id}|${[...lockedPaths].sort().join(",")}`;
+    if (frontierCache.current.has(cacheKey)) {
+      setFrontier(frontierCache.current.get(cacheKey));
+      return;
+    }
+    setFrontier([]);
+    let cancelled = false;
+    let pendingTimer = null;
+    const N = 3;
+    const accumulated = [];
     const seen = new Set();
-    for (let i = 0; i <= N; i++) {
+
+    const runStep = (i) => {
+      if (cancelled || i > N) {
+        if (!cancelled) {
+          accumulated.sort((a, b) => a.e - b.e);
+          frontierCache.current.set(cacheKey, accumulated);
+          setFrontier(accumulated);
+        }
+        return;
+      }
       const eFloor = Math.round((i / N) * maxStats.e);
+      const t0 = Date.now();
       try {
         const result = optimizeBuild(selectedWeapon, "custom", {
           currentMods: mods,
@@ -216,19 +248,35 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
           ergoTarget: eFloor,
           recoilTarget: 0,
         });
+        const dt = Date.now() - t0;
+        if (dt > 500) {
+          console.warn(`[frontier] step ${i}/${N} took ${dt}ms on ${selectedWeapon.shortName} (eFloor=${eFloor})`);
+        }
         const e = Math.round(computeTotalErgo(selectedWeapon, result));
-        // Frontier display in raw V+H units to match the slider's scale.
         const r = pctToRaw(computeTotalRecoil(selectedWeapon, result), selectedWeapon);
         const k = `${e},${r}`;
-        if (seen.has(k)) continue;
-        seen.add(k);
-        points.push({ e, r });
-      } catch {
-        // skip
+        if (!seen.has(k)) {
+          seen.add(k);
+          accumulated.push({ e, r });
+          // Progressive UI update so the user sees the curve appear.
+          setFrontier([...accumulated].sort((a, b) => a.e - b.e));
+        }
+      } catch (err) {
+        console.warn("[frontier] step error", err);
       }
-    }
-    points.sort((a, b) => a.e - b.e);
-    setFrontier(points);
+      // Yield between steps so click handlers / paints can run.
+      pendingTimer = setTimeout(() => runStep(i + 1), 16);
+    };
+
+    // Initial delay before any compute, so the user can adjust sliders
+    // for a moment without their input getting drowned out by an
+    // unrelated background sweep.
+    pendingTimer = setTimeout(() => runStep(0), 800);
+
+    return () => {
+      cancelled = true;
+      if (pendingTimer) clearTimeout(pendingTimer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opMode, lockedPaths, selectedWeapon?.id, maxStats.e, maxStats.r]);
 
@@ -561,6 +609,16 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
       setOpMode(mode);
       const opts = { currentMods: mods, lockedPaths };
       if (mode === "custom") {
+        // With both targets at 0 the CUSTOM B&B is unconstrained and
+        // can be slow on conflict-heavy weapons. The recoil-balanced
+        // result is essentially the same answer (max R+E with a soft
+        // ergo target) and hits the precomputed cache for free, so
+        // route through it. Slider changes will trigger the proper
+        // CUSTOM B&B via the auto-run effect once targets are non-zero.
+        if (!customTargets.e && !customTargets.r) {
+          setMods(optimizeBuild(selectedWeapon, "recoil-balanced", opts));
+          return;
+        }
         opts.ergoTarget = customTargets.e;
         // Convert raw V+H reduction (UI units) → recoilModifier-percentage (optimizer units).
         opts.recoilTarget = rawToPct(customTargets.r, selectedWeapon);
