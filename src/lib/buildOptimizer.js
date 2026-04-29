@@ -750,6 +750,62 @@ function optimizeTargeted(weapon, ctx, targetTotalErgo) {
   return best.score === -Infinity ? null : best;
 }
 
+// ---- Bit-vector compilation ----
+//
+// Pre-pass over a weapon that assigns each unique item a sequential
+// bit index and precomputes its forward conflict mask (Uint32Array of
+// bits for items it conflicts with). Once compiled, isCompatible
+// becomes a constant-number-of-words bitwise AND test, and the
+// chosen-set / conflict-pool become Uint32Array masks that can be
+// updated in place during DFS via OR / XOR — no Set allocations,
+// no string hashing, no GC pressure.
+//
+// Forward-only masks are sufficient even for asymmetric conflicts:
+// "Y conflicts with X" is encoded in Y's forward mask, so when Y is
+// chosen we OR Y.mask into the conflict pool, putting X's bit there.
+// X's compatibility check sees its bit in the conflict pool → fails.
+// Symmetric and asymmetric cases both fall out correctly.
+
+const weaponCompileCache = new WeakMap();
+
+function compileWeapon(weapon) {
+  if (weaponCompileCache.has(weapon)) return weaponCompileCache.get(weapon);
+
+  const idToBit = new Map();
+  const items = [];
+  const walk = (slots) => {
+    if (!slots) return;
+    for (const slot of slots) {
+      for (const item of slot.filters?.allowedItems || []) {
+        if (!idToBit.has(item.id)) {
+          idToBit.set(item.id, items.length);
+          items.push(item);
+        }
+        if (item.properties?.slots) walk(item.properties.slots);
+      }
+    }
+  };
+  walk(weapon?.properties?.slots);
+
+  const total = items.length;
+  const words = Math.max(1, Math.ceil(total / 32));
+  const masks = new Array(total);
+  for (let i = 0; i < total; i++) masks[i] = new Uint32Array(words);
+
+  for (const item of items) {
+    const myBit = idToBit.get(item.id);
+    for (const c of item.conflictingItems || []) {
+      const otherBit = idToBit.get(c.id);
+      if (otherBit === undefined) continue;
+      masks[myBit][otherBit >> 5] |= (1 << (otherBit & 31));
+    }
+  }
+
+  const compiled = { idToBit, items, total, words, masks };
+  weaponCompileCache.set(weapon, compiled);
+  return compiled;
+}
+
 // ---- "custom" dual-floor optimizer ----
 //
 // score = totalErgo + totalRecoil - PENALTY * (eDeficit + rDeficit)
@@ -762,6 +818,8 @@ function optimizeTargeted(weapon, ctx, targetTotalErgo) {
 // build instead of refusing to optimize.
 
 function optimizeCustom(weapon, ctx, eTarget, rTarget, seedMods = null) {
+  const compiled = compileWeapon(weapon);
+  const WORDS = compiled.words;
   const baseErgo = weapon?.properties?.ergonomics || 0;
   const eTargetMod = Math.max(0, eTarget - baseErgo);
   const rTargetMod = Math.max(0, rTarget);
@@ -770,35 +828,51 @@ function optimizeCustom(weapon, ctx, eTarget, rTarget, seedMods = null) {
 
   const rCtx = { ...ctx, mode: "recoil", ubCache: new Map() };
   const eCtx = { ...ctx, mode: "ergo", ubCache: new Map() };
-  // cCtx tracks per-slot max(R + E) — the score-axis UB for the
-  // dual-floor B&B. Tighter than restR + restE which counts max-R and
-  // max-E independently per slot (usually different items).
   const cCtx = { ...ctx, mode: "ergoplusrecoil", ubCache: new Map() };
+
+  // Build initial stack with cached UBs and bit info per entry. Keys
+  // computed once here instead of recomputed via string concat + Map
+  // lookup at every DFS push/pop.
+  const buildStackEntry = (slot, pathPrefix) => {
+    const path = pathPrefix ? `${pathPrefix}.${slot.nameId}` : slot.nameId;
+    return {
+      slot,
+      pathPrefix,
+      path,
+      ubR: ubForSlot(slot, path, rCtx),
+      ubE: ubForSlot(slot, path, eCtx),
+      ubC: ubForSlot(slot, path, cCtx),
+      forced: isForced(path, slot, ctx),
+    };
+  };
 
   const stack = [];
   for (const s of topSlots) {
     if (!(s?.filters?.allowedItems?.length > 0)) continue;
-    stack.push({ slot: s, pathPrefix: "" });
+    stack.push(buildStackEntry(s, ""));
   }
-  // LIFO: forced slots popped first (end of array), then largest combined UB.
+  // LIFO: forced first (popped first), then largest-combined-UB.
   stack.sort((a, b) => {
-    const pa = a.pathPrefix ? `${a.pathPrefix}.${a.slot.nameId}` : a.slot.nameId;
-    const pb = b.pathPrefix ? `${b.pathPrefix}.${b.slot.nameId}` : b.slot.nameId;
-    const fa = isForced(pa, a.slot, ctx);
-    const fb = isForced(pb, b.slot, ctx);
-    if (fa !== fb) return fa ? 1 : -1;
-    return ubForSlot(a.slot, pa, cCtx) - ubForSlot(b.slot, pb, cCtx);
+    if (a.forced !== b.forced) return a.forced ? 1 : -1;
+    return a.ubC - b.ubC;
   });
 
   let restR = 0;
   let restE = 0;
   let restC = 0;
   for (const e of stack) {
-    const p = e.pathPrefix ? `${e.pathPrefix}.${e.slot.nameId}` : e.slot.nameId;
-    restR += ubForSlot(e.slot, p, rCtx);
-    restE += ubForSlot(e.slot, p, eCtx);
-    restC += ubForSlot(e.slot, p, cCtx);
+    restR += e.ubR;
+    restE += e.ubE;
+    restC += e.ubC;
   }
+
+  // Mutable closure state — updated in place during DFS, undone on
+  // backtrack. Eliminates the per-recursion-frame Set allocation and
+  // object spread that were dominating CPU on conflict-heavy weapons.
+  const chosenMask = new Uint32Array(WORDS);
+  const conflictMask = new Uint32Array(WORDS);
+  const curMods = {};
+  const curPicked = [];
 
   let best = {
     combined: -Infinity,
@@ -817,11 +891,6 @@ function optimizeCustom(weapon, ctx, eTarget, rTarget, seedMods = null) {
     return score - PENALTY * (eDef + rDef);
   }
 
-  // Seed: when targets are 0 (or low) the feasibility prune does
-  // nothing, so the DFS would otherwise explore most of the search
-  // space. A precomputed seed (any complete build) gives the DFS a
-  // tight initial bound. Without this, CUSTOM at e=0 r=0 takes
-  // ~7s on conflict-heavy weapons; with it, <100ms.
   if (seedMods) {
     const seedE = computeTotalErgo(weapon, seedMods) - baseErgo;
     const seedR = computeTotalRecoil(weapon, seedMods);
@@ -840,25 +909,20 @@ function optimizeCustom(weapon, ctx, eTarget, rTarget, seedMods = null) {
   }
 
   function combinedUB(curR, curE) {
-    // Score UB uses restC (sum of per-slot max(R+E)) — tighter than
-    // restR + restE because the latter implies you can pick max-R and
-    // max-E from the same slot, which usually requires picking
-    // different items. Deficits stay on per-axis maxima (restR/restE)
-    // since reaching the floor requires actually maxing that axis.
     const score = curR + curE + restC;
     const eDefLB = Math.max(0, eTargetMod - (curE + restE));
     const rDefLB = Math.max(0, rTargetMod - (curR + restR));
     return score - PENALTY * (eDefLB + rDefLB);
   }
 
-  function commit(curR, curE, curMods, curPicked) {
+  function commit(curR, curE) {
     const combined = combinedScore(curR, curE);
     if (combined > best.combined) {
       best = {
         combined,
         score: curR + curE,
-        mods: curMods,
-        picked: curPicked,
+        mods: { ...curMods },
+        picked: [...curPicked],
         totalRecoil: curR,
         totalErgo: baseErgo + curE,
         feasible: curE >= eTargetMod && curR >= rTargetMod,
@@ -866,155 +930,161 @@ function optimizeCustom(weapon, ctx, eTarget, rTarget, seedMods = null) {
     }
   }
 
-  function dfs(curR, curE, curMods, curPicked, curChosen, curConflicts) {
+  function isCompatibleBits(itemBit, itemMask) {
+    if (itemBit < 0) return true;
+    if ((conflictMask[itemBit >> 5] >> (itemBit & 31)) & 1) return false;
+    if (itemMask) {
+      for (let i = 0; i < WORDS; i++) {
+        if (itemMask[i] & chosenMask[i]) return false;
+      }
+    }
+    return true;
+  }
+
+  function applyItem(itemBit, itemMask) {
+    const undoConflict = new Uint32Array(WORDS);
+    if (itemBit >= 0) {
+      chosenMask[itemBit >> 5] |= (1 << (itemBit & 31));
+      if (itemMask) {
+        for (let i = 0; i < WORDS; i++) {
+          undoConflict[i] = itemMask[i] & ~conflictMask[i];
+          conflictMask[i] |= itemMask[i];
+        }
+      }
+    }
+    return undoConflict;
+  }
+
+  function undoItem(itemBit, undoConflict) {
+    if (itemBit >= 0) {
+      chosenMask[itemBit >> 5] &= ~(1 << (itemBit & 31));
+      for (let i = 0; i < WORDS; i++) {
+        conflictMask[i] &= ~undoConflict[i];
+      }
+    }
+  }
+
+  // Recurse into picked item: push its sub-slots, recurse dfs, then
+  // pop them. Shared helper used by both the forced and free branches.
+  function withSubSlots(item, path, curR, curE) {
+    const subSlots = item.properties?.slots || [];
+    const pushed = [];
+    for (const s of subSlots) {
+      if (!(s?.filters?.allowedItems?.length > 0)) continue;
+      pushed.push(buildStackEntry(s, path));
+    }
+    pushed.sort((a, b) => {
+      if (a.forced !== b.forced) return a.forced ? 1 : -1;
+      return a.ubC - b.ubC;
+    });
+    for (const entry of pushed) {
+      stack.push(entry);
+      restR += entry.ubR;
+      restE += entry.ubE;
+      restC += entry.ubC;
+    }
+    dfs(curR, curE);
+    for (let j = 0; j < pushed.length; j++) {
+      const entry = stack.pop();
+      restR -= entry.ubR;
+      restE -= entry.ubE;
+      restC -= entry.ubC;
+    }
+  }
+
+  function dfs(curR, curE) {
     if (combinedUB(curR, curE) <= best.combined) return;
 
     if (stack.length === 0) {
-      commit(curR, curE, curMods, curPicked);
+      commit(curR, curE);
       return;
     }
 
     const top = stack.pop();
     const slot = top.slot;
-    const path = top.pathPrefix ? `${top.pathPrefix}.${slot.nameId}` : slot.nameId;
-    const slotUR = ubForSlot(slot, path, rCtx);
-    const slotUE = ubForSlot(slot, path, eCtx);
-    const slotUC = ubForSlot(slot, path, cCtx);
-    restR -= slotUR;
-    restE -= slotUE;
-    restC -= slotUC;
+    const path = top.path;
+    restR -= top.ubR;
+    restE -= top.ubE;
+    restC -= top.ubC;
 
-    if (isForced(path, slot, ctx)) {
+    if (top.forced) {
       const mod = getForcedMod(slot, path, ctx);
       if (!mod) {
-        dfs(curR, curE, curMods, curPicked, curChosen, curConflicts);
-      } else if (!isCompatible(mod, curChosen, curConflicts)) {
-        // Lock conflict — PRUNE.
+        dfs(curR, curE);
       } else {
-        const newChosen = new Set(curChosen);
-        newChosen.add(mod.id);
-        const newConflicts = new Set(curConflicts);
-        if (mod.conflictingItems) {
-          for (const c of mod.conflictingItems) newConflicts.add(c.id);
+        const itemBit = compiled.idToBit.get(mod.id);
+        const bit = itemBit === undefined ? -1 : itemBit;
+        const mask = bit >= 0 ? compiled.masks[bit] : null;
+        if (isCompatibleBits(bit, mask)) {
+          const undoConflict = applyItem(bit, mask);
+          const itemR = recoilContrib(mod.properties);
+          const itemE = ergoContrib(mod.properties);
+          const prevModId = curMods[path];
+          curMods[path] = mod.id;
+          curPicked.push(mod);
+
+          withSubSlots(mod, path, curR + itemR, curE + itemE);
+
+          if (prevModId === undefined) delete curMods[path];
+          else curMods[path] = prevModId;
+          curPicked.pop();
+          undoItem(bit, undoConflict);
         }
-        const itemR = recoilContrib(mod.properties);
-        const itemE = ergoContrib(mod.properties);
-        const subSlots = mod.properties?.slots || [];
-        const pushed = [];
-        for (const s of subSlots) {
-          if (!(s?.filters?.allowedItems?.length > 0)) continue;
-          pushed.push({ slot: s, pathPrefix: path });
-        }
-        pushed.sort((a, b) => {
-          const pa = `${a.pathPrefix}.${a.slot.nameId}`;
-          const pb = `${b.pathPrefix}.${b.slot.nameId}`;
-          const fa = isForced(pa, a.slot, ctx);
-          const fb = isForced(pb, b.slot, ctx);
-          if (fa !== fb) return fa ? 1 : -1;
-          return ubForSlot(a.slot, pa, cCtx) - ubForSlot(b.slot, pb, cCtx);
-        });
-        for (const entry of pushed) {
-          const p = `${entry.pathPrefix}.${entry.slot.nameId}`;
-          stack.push(entry);
-          restR += ubForSlot(entry.slot, p, rCtx);
-          restE += ubForSlot(entry.slot, p, eCtx);
-          restC += ubForSlot(entry.slot, p, cCtx);
-        }
-        dfs(
-          curR + itemR,
-          curE + itemE,
-          { ...curMods, [path]: mod.id },
-          [...curPicked, mod],
-          newChosen,
-          newConflicts
-        );
-        for (let j = 0; j < pushed.length; j++) {
-          const entry = stack.pop();
-          const p = `${entry.pathPrefix}.${entry.slot.nameId}`;
-          restR -= ubForSlot(entry.slot, p, rCtx);
-          restE -= ubForSlot(entry.slot, p, eCtx);
-          restC -= ubForSlot(entry.slot, p, cCtx);
-        }
+        // else: lock conflict, PRUNE this branch.
       }
       stack.push(top);
-      restR += slotUR;
-      restE += slotUE;
-      restC += slotUC;
+      restR += top.ubR;
+      restE += top.ubE;
+      restC += top.ubC;
       return;
     }
 
+    // Skip branch (optional slot)
     if (!slot.required) {
-      dfs(curR, curE, curMods, curPicked, curChosen, curConflicts);
+      dfs(curR, curE);
     }
 
+    // Pick branches — collect compatible candidates with their bit info,
+    // sort by combined R+E desc.
     const items = getFilteredItems(slot, ctx);
     const compatible = [];
     for (const it of items) {
       if (ctx.isAvailable && !ctx.isAvailable(it)) continue;
-      if (!isCompatible(it, curChosen, curConflicts)) continue;
-      compatible.push(it);
-    }
-    // Sort by combined R+E contribution desc to surface a high-score
-    // solution early and tighten bounds.
-    compatible.sort((a, b) =>
-      (recoilContrib(b.properties) + ergoContrib(b.properties))
-      - (recoilContrib(a.properties) + ergoContrib(a.properties))
-    );
-
-    for (const it of compatible) {
-      const newChosen = new Set(curChosen);
-      newChosen.add(it.id);
-      const newConflicts = new Set(curConflicts);
-      if (it.conflictingItems) {
-        for (const c of it.conflictingItems) newConflicts.add(c.id);
-      }
-      const itemR = recoilContrib(it.properties);
-      const itemE = ergoContrib(it.properties);
-      const subSlots = it.properties?.slots || [];
-      const pushed = [];
-      for (const s of subSlots) {
-        if (!(s?.filters?.allowedItems?.length > 0)) continue;
-        pushed.push({ slot: s, pathPrefix: path });
-      }
-      pushed.sort((a, b) => {
-        const pa = `${a.pathPrefix}.${a.slot.nameId}`;
-        const pb = `${b.pathPrefix}.${b.slot.nameId}`;
-        const fa = isForced(pa, a.slot, ctx);
-        const fb = isForced(pb, b.slot, ctx);
-        if (fa !== fb) return fa ? 1 : -1;
-        return ubForSlot(a.slot, pa, cCtx) - ubForSlot(b.slot, pb, cCtx);
+      const itemBit = compiled.idToBit.get(it.id);
+      const bit = itemBit === undefined ? -1 : itemBit;
+      const mask = bit >= 0 ? compiled.masks[bit] : null;
+      if (!isCompatibleBits(bit, mask)) continue;
+      compatible.push({
+        item: it,
+        bit,
+        mask,
+        itemR: recoilContrib(it.properties),
+        itemE: ergoContrib(it.properties),
       });
-      for (const entry of pushed) {
-        const p = `${entry.pathPrefix}.${entry.slot.nameId}`;
-        stack.push(entry);
-        restR += ubForSlot(entry.slot, p, rCtx);
-        restE += ubForSlot(entry.slot, p, eCtx);
-        restC += ubForSlot(entry.slot, p, cCtx);
-      }
-      dfs(
-        curR + itemR,
-        curE + itemE,
-        { ...curMods, [path]: it.id },
-        [...curPicked, it],
-        newChosen,
-        newConflicts
-      );
-      for (let j = 0; j < pushed.length; j++) {
-        const entry = stack.pop();
-        const p = `${entry.pathPrefix}.${entry.slot.nameId}`;
-        restR -= ubForSlot(entry.slot, p, rCtx);
-        restE -= ubForSlot(entry.slot, p, eCtx);
-        restC -= ubForSlot(entry.slot, p, cCtx);
-      }
+    }
+    compatible.sort((a, b) => (b.itemR + b.itemE) - (a.itemR + a.itemE));
+
+    for (const c of compatible) {
+      const undoConflict = applyItem(c.bit, c.mask);
+      const prevModId = curMods[path];
+      curMods[path] = c.item.id;
+      curPicked.push(c.item);
+
+      withSubSlots(c.item, path, curR + c.itemR, curE + c.itemE);
+
+      if (prevModId === undefined) delete curMods[path];
+      else curMods[path] = prevModId;
+      curPicked.pop();
+      undoItem(c.bit, undoConflict);
     }
 
     stack.push(top);
-    restR += slotUR;
-    restE += slotUE;
-    restC += slotUC;
+    restR += top.ubR;
+    restE += top.ubE;
+    restC += top.ubC;
   }
 
-  dfs(0, 0, {}, [], EMPTY_SET, EMPTY_SET);
+  dfs(0, 0);
   return best.combined === -Infinity ? null : best;
 }
 
