@@ -8,7 +8,6 @@ import { calcStats, getCheapestPrice } from '../lib/buildStats.js';
 import { isAvailableForProfile } from '../lib/availability.js';
 import { useCopyToClipboard } from '../hooks/useCopyToClipboard.js';
 import { useStorage } from '../hooks/useStorage.js';
-import { useDebouncedValue } from '../hooks/useDebounce.js';
 
 // Slot nameIds the optimizer skips by default — must match
 // DEFAULT_SKIP in buildOptimizer.js. Used here to grey out the lock
@@ -99,8 +98,11 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
   // recomputing the 5-point sweep when nothing relevant changed
   // (e.g. user toggling between modes, slider drags).
   const frontierCache = useRef(new Map());
-  // Debounce slider drags so we don't run the optimizer on every pixel of movement.
-  const debouncedTargets = useDebouncedValue(customTargets, 200);
+  // While a manual CUSTOM run is in flight, show a "computing…"
+  // indicator. Setting this BEFORE the synchronous optimizer call and
+  // re-rendering with setTimeout(0) lets the spinner paint before the
+  // main thread blocks for the compute.
+  const [isCustomRunning, setIsCustomRunning] = useState(false);
 
   // Lazy load weapon list on first mount
   useEffect(() => {
@@ -178,37 +180,12 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedWeapon?.id, lockedPaths, gameMode]);
 
-  // CUSTOM mode auto-run: any change to debounced targets (or locks)
-  // re-runs the dual-floor optimizer and overwrites `mods`. Manual mod
-  // edits don't trigger this (mods isn't in deps).
-  useEffect(() => {
-    if (opMode !== "custom" || !selectedWeapon) return;
-    try {
-      // With both targets at 0 the CUSTOM B&B has nothing to constrain;
-      // route through recoil-balanced (cached, instant) instead of
-      // running a slow unconstrained search.
-      if (!debouncedTargets.e && !debouncedTargets.r) {
-        setMods(optimizeBuild(selectedWeapon, "recoil-balanced", {
-          currentMods: mods,
-          lockedPaths,
-        }));
-        return;
-      }
-      const newMods = optimizeBuild(selectedWeapon, "custom", {
-        currentMods: mods,
-        lockedPaths,
-        ergoTarget: debouncedTargets.e,
-        recoilTarget: rawToPct(debouncedTargets.r, selectedWeapon),
-      });
-      setMods(newMods);
-    } catch {
-      // Optimizer error — keep current mods. UI continues to function.
-    }
-    // opMode intentionally excluded: clicking CUSTOM in `runMode` runs the
-    // optimizer directly, so this effect only handles slider/lock changes
-    // *while already in* CUSTOM. Including opMode would double-fire.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedTargets.e, debouncedTargets.r, lockedPaths, selectedWeapon?.id]);
+  // CUSTOM mode is now explicit — slider drags update the targets in
+  // real time but DON'T trigger the optimizer. The user clicks RUN
+  // OPTIMIZE in the CUSTOM panel to commit. Auto-running on slider
+  // change would freeze the editor for many seconds on conflict-heavy
+  // weapons (each B&B call can be > 1s). Locks similarly require an
+  // explicit re-run.
 
   // Frontier compute disabled — chart was driving the freeze on
   // conflict-heavy weapons. The chart only renders when frontier has
@@ -824,6 +801,45 @@ export default function BuildsTab({ savedBuilds, saveSavedBuilds, myProfile }) {
                   style={{ width: "100%", accentColor: T.orange }}
                 />
               </div>
+              {/* Explicit RUN button. CUSTOM optimization can take several
+                  seconds on conflict-heavy weapons (Model 1, AKM, etc.),
+                  so we don't auto-run on slider drag. setTimeout(0) lets
+                  the "computing…" state paint before the main thread
+                  blocks for the synchronous compute. */}
+              <button
+                onClick={() => {
+                  if (isCustomRunning || !ready) return;
+                  setIsCustomRunning(true);
+                  setTimeout(() => {
+                    try {
+                      const newMods = optimizeBuild(selectedWeapon, "custom", {
+                        currentMods: mods,
+                        lockedPaths,
+                        ergoTarget: customTargets.e,
+                        recoilTarget: rawToPct(customTargets.r, selectedWeapon),
+                      });
+                      setMods(newMods);
+                    } catch {
+                      // Keep current mods if the optimizer trips.
+                    }
+                    setIsCustomRunning(false);
+                  }, 0);
+                }}
+                disabled={isCustomRunning || !ready}
+                style={{
+                  width: "100%",
+                  marginTop: 12,
+                  background: isCustomRunning ? T.gold + "11" : T.purple + "22",
+                  border: `2px solid ${isCustomRunning ? T.gold : T.purple}`,
+                  color: isCustomRunning ? T.gold : T.purple,
+                  padding: "8px 0",
+                  fontSize: T.fs2,
+                  cursor: isCustomRunning || !ready ? "default" : "pointer",
+                  fontFamily: T.sans,
+                  letterSpacing: 1,
+                  fontWeight: "bold",
+                }}
+              >{isCustomRunning ? "COMPUTING…" : "RUN OPTIMIZER"}</button>
               {/* Pareto frontier mini-chart. Shows the achievable (E, R)
                   trade-off curve for this weapon and the user's current
                   target as a crosshair. Helps users see at a glance which

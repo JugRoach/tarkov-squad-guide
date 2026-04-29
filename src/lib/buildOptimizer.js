@@ -965,12 +965,28 @@ export function optimizeBuild(weapon, mode, options = {}) {
   let resultMods;
 
   if (mode === "custom") {
+    // Trivially-met targets (both effective floors at 0) make CUSTOM's
+    // search degenerate to "maximize R+E unconstrained" — same kind of
+    // build recoil-balanced gives, but without the feasibility prune
+    // to keep B&B fast. Route through recoil-balanced so a slider
+    // nudge from 0 doesn't kick off a multi-second optimization.
+    const baseErgoCheck = weapon?.properties?.ergonomics || 0;
+    const eTargetModCheck = Math.max(0, (ergoTarget || 0) - baseErgoCheck);
+    const rTargetModCheck = Math.max(0, recoilTarget || 0);
+    if (eTargetModCheck === 0 && rTargetModCheck === 0) {
+      return optimizeBuild(weapon, "recoil-balanced", {
+        currentMods,
+        lockedPaths,
+        isAvailable,
+        skipSlot,
+      });
+    }
     const ctx = { ...baseCtx };
     // Seed the CUSTOM B&B with a complete build so the score-UB prune
-    // fires from turn 1. Without this, e=0 r=0 takes ~7s on
-    // conflict-heavy weapons (no feasibility prune to help). Precompute
-    // cache hits give a free seed; with locks/availability we run a
-    // fast scalar recoil-balanced pass for the seed.
+    // fires from turn 1. Without this, low-but-nonzero targets explode
+    // the search on conflict-heavy weapons. Precompute cache hits give
+    // a free seed; with locks/availability we run a fast scalar
+    // recoil-balanced pass for the seed.
     let seedMods = null;
     if (!isAvailable && lockedPaths.size === 0 && skipSlot === defaultSkipSlot && weapon?.id) {
       seedMods = PRECOMPUTED_BUILDS[weapon.id]?.modes?.["recoil-balanced"] || null;
